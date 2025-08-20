@@ -17,6 +17,11 @@ def load_image(fname, width=900, plot=[]):
     else:
         img0 = sk.data.coffee() # coffee (example image)
     
+    # Convert RGBA to RGB if image has 4 channels (alpha channel)
+    if len(img0.shape) == 3 and img0.shape[2] == 4:
+        img0 = img0[:, :, :3]  # Remove alpha channel
+        print("Converted RGBA image to RGB")
+    
     # ensure image is rgb (for consistency)
     if len(img0.shape)<3:
         img0 = sk.color.gray2rgb(img0) 
@@ -24,8 +29,14 @@ def load_image(fname, width=900, plot=[]):
     # resize to same image width => tile size has always similar effect
     if width is not None:
         factor = width/img0.shape[1]
-        img0 = transform.resize(img0, (int(img0.shape[0]*factor), int(img0.shape[1]*factor)), anti_aliasing=True) 
-    img0 = (img0*255).astype(int)
+        img0 = transform.resize(img0, (int(img0.shape[0]*factor), int(img0.shape[1]*factor)), anti_aliasing=True)
+        img0 = (img0*255).astype(int)  # transform.resize returns 0-1 range, convert to 0-255
+    else:
+        # No resizing - ensure image is in 0-255 range
+        if img0.max() <= 1.0:
+            img0 = (img0*255).astype(int)  # Convert 0-1 to 0-255
+        else:
+            img0 = img0.astype(int)  # Already 0-255, just ensure integer type
     if 'original' in plot: plotting.plot_image(img0)
     print (f'Size of input image: {img0.shape[0]}px * {img0.shape[1]}px')
     
@@ -105,7 +116,7 @@ def hed_edges(image):
 def edges_hed(img, gauss=None, plot=[]):
 
     if gauss:
-        img = filters.gaussian(img, sigma=16, truncate=gauss/16, multichannel=True)
+        img = filters.gaussian(img, sigma=16, truncate=gauss/16)
     
     img = img/np.amax(img)*255
     img = img.astype(np.uint8)    

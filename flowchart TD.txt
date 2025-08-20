@@ -1,0 +1,15 @@
+A: Load Image & Parameters
+B: Edge Detection (HED/DiBlasi)
+C: Interactive Guideline Drawing & Edge Erasing
+D: Place Tiles Along Guideline Chains
+E: Place Tiles Into Gaps
+F: Cut Tiles at Image Frame
+G: Make Tiles Convex
+H: Post-Process Tiles (Shrink, Repair, Simplify)
+I: Drop Very Small Tiles
+J: O1 Visualize Tiles After Dropping Small Tiles
+K: Assign Final Colors from Original Image
+L: Generate Final Mosaic Image/SVG
+M: Optional Recoloring Based on Schemas
+N: Optional Statistics Plot
+O: Save Final Polygons to CSV

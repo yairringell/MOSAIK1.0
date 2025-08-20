@@ -1,6 +1,7 @@
-numpy=1.19.2
-scikit-image=0.17.2
-opencv>=3.4.3
-scipy=1.6.2
-matplotlib=3.3.4
-shapely=1.7.0
+numpy
+scikit-image
+opencv-python
+scipy
+matplotlib
+shapely
+rtree
