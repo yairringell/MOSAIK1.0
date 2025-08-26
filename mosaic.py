@@ -10,7 +10,7 @@ Based on algorithm described in "Artificial Mosaics (2005)" by Di Blasi
 import time
 import random
 import tkinter as tk
-from tkinter import filedialog
+from tkinter import filedialog, simpledialog
 import matplotlib.pyplot as plt
 from matplotlib import patches
 import numpy as np
@@ -83,10 +83,28 @@ fname = filedialog.askopenfilename(
 if not fname:
     print("No file selected. Using default test image.")
     fname = r''  # Empty string will use the default test image
+
+# Ask user for desired size of the longer side using popup dialog
+root = tk.Tk()
+root.withdraw()  # Hide the main window
+
+long_side_size = simpledialog.askinteger(
+    "Image Size",
+    "Enter the desired size for the longer side of the image:\n(100-5000 pixels)",
+    initialvalue=1000,
+    minvalue=100,
+    maxvalue=5000
+)
+
+# If user cancels the dialog, use default value
+if long_side_size is None:
+    long_side_size = 1000
+
+print(f"Image will be resized so its longer side is {long_side_size} pixels.")
  
 
 # Parameters
-half_tile =5 # 4...30 => half size of mosaic tile
+half_tile =8 # 4...30 => half size of mosaic tile
 GAUSS = 8 # 0...8 => blurs image before edge detection (check "edges" image for a good value)
 EDGE_DETECTION = 'HED' # HED or DiBlasi
 WITH_FRAME = True # default is True => control about guidelines along image borders
@@ -120,9 +138,8 @@ plot_list = [
 # Load image
 t_start = time.time()
 random.seed(0)
-# You can change width=1000 to a larger value, but processing time will increase significantly
-# For example: width=1200 for higher resolution, or width=None to use original size
-img0 = edges.load_image(fname, width=None, plot=plot_list)
+# Load image with user-specified long side size
+img0 = edges.load_image(fname, width=None, long_side=long_side_size, plot=plot_list)
 h,w = img0.shape[0],img0.shape[1]
 A0 = (2*half_tile)**2 # area of tile when placed along straight guideline
 print (f'Estimated number of tiles: {2*w*h/A0:.0f}') # factor 2 since tiles can be smaller than default size

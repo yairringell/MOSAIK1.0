@@ -10,7 +10,7 @@ import plotting
 from pathlib import Path
 
 
-def load_image(fname, width=900, plot=[]):
+def load_image(fname, width=900, long_side=None, plot=[]):
     
     if fname:
         img0 = imread(fname)
@@ -26,8 +26,22 @@ def load_image(fname, width=900, plot=[]):
     if len(img0.shape)<3:
         img0 = sk.color.gray2rgb(img0) 
 
-    # resize to same image width => tile size has always similar effect
-    if width is not None:
+    # resize image
+    if long_side is not None:
+        # Resize based on longer side while maintaining aspect ratio
+        height, width_current = img0.shape[0], img0.shape[1]
+        if width_current >= height:
+            # Landscape: width is longer
+            factor = long_side / width_current
+        else:
+            # Portrait: height is longer
+            factor = long_side / height
+        new_height = int(height * factor)
+        new_width = int(width_current * factor)
+        img0 = transform.resize(img0, (new_height, new_width), anti_aliasing=True)
+        img0 = (img0*255).astype(int)  # transform.resize returns 0-1 range, convert to 0-255
+    elif width is not None:
+        # Original behavior: resize by width
         factor = width/img0.shape[1]
         img0 = transform.resize(img0, (int(img0.shape[0]*factor), int(img0.shape[1]*factor)), anti_aliasing=True)
         img0 = (img0*255).astype(int)  # transform.resize returns 0-1 range, convert to 0-255
