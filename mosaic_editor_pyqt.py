@@ -2850,6 +2850,19 @@ class MosaicEditor(QMainWindow):
             self.save_boxes_btn.setText("Save Boxes")
             return  # User cancelled
         
+        # Ask user if they want to apply filet to polygons
+        from PyQt5.QtWidgets import QMessageBox
+        reply = QMessageBox.question(
+            self,
+            "Apply Filet",
+            "Do you want to apply filet (radius 0.5) to all polygon corners in the DXF files?\n\n"
+            "This will create rounded corners on the tiles.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No  # Default to No
+        )
+        
+        apply_filet = (reply == QMessageBox.Yes)
+        
         # Get grid parameters
         cell_size_world = self.canvas_container.canvas.grid_size
         grid_x_world = self.canvas_container.canvas.grid_offset_x
@@ -2957,7 +2970,7 @@ class MosaicEditor(QMainWindow):
             # Save DXF files - main box file and separate files for each color
             try:
                 # Save main DXF file with all polygons
-                self.save_polygons_to_dxf(polygons_data, dxf_filepath, box_name, box_index)
+                self.save_polygons_to_dxf(polygons_data, dxf_filepath, box_name, box_index, apply_filet)
                 dxf_files_saved += 1
                 
                 # Group polygons by original color (for manufacturing accuracy)
@@ -2980,7 +2993,7 @@ class MosaicEditor(QMainWindow):
                     color_dxf_filepath = f"{box_folder_path}/{color_dxf_filename}"
                     
                     try:
-                        self.save_polygons_to_dxf(color_polygons, color_dxf_filepath, f"{box_name} - {color_hex}", box_index)
+                        self.save_polygons_to_dxf(color_polygons, color_dxf_filepath, f"{box_name} - {color_hex}", box_index, apply_filet)
                         dxf_files_saved += 1
                     except Exception as e:
                         QMessageBox.warning(self, "Error", f"Failed to save color DXF {color_dxf_filename}: {str(e)}")
@@ -3077,7 +3090,7 @@ class MosaicEditor(QMainWindow):
         # Force UI update to show the re-enabled state
         QApplication.processEvents()
 
-    def save_polygons_to_dxf(self, polygons_data, dxf_filepath, box_name, box_index=None):
+    def save_polygons_to_dxf(self, polygons_data, dxf_filepath, box_name, box_index=None, apply_filet=False):
         """Save polygons to DXF file format with frame based on grid box dimensions"""
         # Create a simple DXF file manually (without external dependencies)
         with open(dxf_filepath, 'w', encoding='utf-8') as f:
@@ -3169,7 +3182,41 @@ class MosaicEditor(QMainWindow):
                 polygon = poly_data['polygon']
                 color = poly_data['color']
                 
-                # Get coordinates
+                # Apply filet if requested
+                if apply_filet:
+                    try:
+                        # Apply internal filet with radius 0.5
+                        filet_radius = 0.5
+                        
+                        # Create internal filet that doesn't exceed original polygon boundaries
+                        shrunk_polygon = polygon.buffer(-filet_radius)
+                        
+                        if shrunk_polygon.is_valid and not shrunk_polygon.is_empty:
+                            # Expand back by same radius to create rounded corners
+                            filleted_polygon = shrunk_polygon.buffer(filet_radius)
+                            
+                            # Ensure result doesn't exceed original boundaries by intersecting
+                            final_polygon = filleted_polygon.intersection(polygon)
+                            
+                            # Handle MultiPolygon results (take the largest polygon)
+                            from shapely.geometry import MultiPolygon
+                            if isinstance(final_polygon, MultiPolygon):
+                                if len(final_polygon.geoms) > 0:
+                                    final_polygon = max(final_polygon.geoms, key=lambda p: p.area)
+                                else:
+                                    final_polygon = polygon  # Fallback to original
+                            
+                            # Use filleted polygon if valid
+                            if (final_polygon.is_valid and 
+                                not final_polygon.is_empty and 
+                                hasattr(final_polygon, 'exterior')):
+                                polygon = final_polygon
+                    
+                    except Exception as e:
+                        # If filet fails, use original polygon
+                        print(f"Warning: Could not apply filet to polygon {poly_id}: {e}")
+                
+                # Get coordinates from the (possibly filleted) polygon
                 coords = list(polygon.exterior.coords)
                 
                 # Map color to AutoCAD color index (simplified)
