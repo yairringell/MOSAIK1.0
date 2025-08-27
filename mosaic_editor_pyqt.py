@@ -255,6 +255,10 @@ class MosaicCanvas(QWidget):
         self.polygon_points = []  # Points for the current polygon being drawn
         self.polygon_cursor_size = 10  # Size of the square cursor in pixels
         
+        # Overlap check mode variables
+        self.overlap_check_mode = False  # Whether overlap check mode is active
+        self.overlap_highlights = []  # List of overlapping polygon pairs
+        
         # Grid variables
         self.show_grid = False  # Whether to show the grid
         self.grid_size = 300  # Size of each individual grid box/cell in world coordinates
@@ -884,6 +888,33 @@ class MosaicCanvas(QWidget):
                     if screen_polygon.size() > 2:  # Only draw if we have enough points
                         painter.drawPolygon(screen_polygon)
         
+        # Draw overlap highlights if in overlap check mode
+        if hasattr(self, 'overlap_check_mode') and self.overlap_check_mode and hasattr(self, 'overlap_highlights'):
+            painter.setPen(QPen(QColor(255, 0, 0), 3))  # Thick red pen with fixed width
+            painter.setBrush(QBrush(Qt.NoBrush))  # No fill, just outline
+            
+            # Get set of all polygon indices that have overlaps
+            overlapping_indices = set()
+            for poly1_idx, poly2_idx in self.overlap_highlights:
+                overlapping_indices.add(poly1_idx)
+                overlapping_indices.add(poly2_idx)
+            
+            # Draw thick red outline for all overlapping polygons
+            for poly_idx in overlapping_indices:
+                if poly_idx < len(self.polygons):
+                    polygon = self.polygons[poly_idx]
+                    if polygon.is_valid:
+                        # Convert polygon coordinates to screen coordinates
+                        coords = list(polygon.exterior.coords)
+                        screen_polygon = QPolygonF()
+                        
+                        for x, y in coords:
+                            screen_x, screen_y = self.world_to_screen(x, y)
+                            screen_polygon.append(QPointF(screen_x, screen_y))
+                        
+                        # Draw thick red outline
+                        painter.drawPolygon(screen_polygon)
+        
         # Draw control points for selected polygon
         if self.selected_polygon_index >= 0:
             self.draw_control_points(painter)
@@ -1450,7 +1481,7 @@ class MosaicCanvas(QWidget):
             self.is_panning = False
             self.last_drag_point = None
             self.last_pan_point = None
-            self.drag_start_world_pos = None
+            self.drag_start_world_pos = None #fff
         else:
             # Exiting polygon mode
             self.setCursor(Qt.ArrowCursor)  # Restore normal cursor
@@ -2181,6 +2212,11 @@ class MosaicEditor(QMainWindow):
         self.save_plates_btn.setToolTip("Save detected blob contours as DXF files with frames")
         left_panel_layout.addWidget(self.save_plates_btn)
         
+        # Overlap button
+        self.overlap_btn = QPushButton("Overlap Check")
+        self.overlap_btn.setToolTip("Highlight all polygon overlaps with red outlines")
+        left_panel_layout.addWidget(self.overlap_btn)
+        
         # Add stretch to push buttons to top
         left_panel_layout.addStretch()
         
@@ -2245,6 +2281,7 @@ class MosaicEditor(QMainWindow):
         self.cut_tiles_btn.clicked.connect(self.on_cut_tiles_clicked)
         self.save_boxes_btn.clicked.connect(self.on_save_boxes_clicked)
         self.save_plates_btn.clicked.connect(self.on_save_plates_clicked)
+        self.overlap_btn.clicked.connect(self.on_overlap_check_clicked)
         
         # Color palette signals
         self.color_palette.color_selected.connect(self.on_color_selected)
@@ -3474,7 +3511,7 @@ class MosaicEditor(QMainWindow):
             QMessageBox.critical(self, "Error", f"An error occurred while saving plates: {str(e)}")
 
     def save_contours_and_frame_to_dxf(self, contours, frame_left, frame_top, frame_right, frame_bottom, dxf_path, box_label):
-        """Save contours, a rectangular frame, and 3 circles arranged in pyramid pattern to a DXF file"""
+        """Save contours and 3 circles arranged in pyramid pattern to a DXF file (no frame)"""
         try:
             import ezdxf
             
@@ -3482,26 +3519,11 @@ class MosaicEditor(QMainWindow):
             doc = ezdxf.new('R2010')
             msp = doc.modelspace()
             
-            # Add frame rectangle
-            frame_points = [
-                (float(frame_left), float(frame_top)),
-                (float(frame_right), float(frame_top)),
-                (float(frame_right), float(frame_bottom)),
-                (float(frame_left), float(frame_bottom)),
-                (float(frame_left), float(frame_top))  # Close the rectangle
-            ]
-            
-            # Create frame polyline with different layer/color
-            frame_polyline = msp.add_lwpolyline(frame_points)
-            frame_polyline.closed = True
-            frame_polyline.dxf.layer = "FRAME"
-            
-            # Calculate grid box boundaries (inside the frame, removing the 20-pixel margin)
-            margin = 20  # Fixed margin used in frame calculation
-            box_left = frame_left + margin
-            box_top = frame_top + margin
-            box_right = frame_right - margin
-            box_bottom = frame_bottom - margin
+            # Calculate grid box boundaries (use the provided coordinates directly)
+            box_left = frame_left
+            box_top = frame_top
+            box_right = frame_right
+            box_bottom = frame_bottom
             
             box_width = box_right - box_left
             box_height = box_bottom - box_top
@@ -3590,6 +3612,141 @@ class MosaicEditor(QMainWindow):
             print(f"Error in detect_a1_blob: {e}")
             return []
 
+    def on_overlap_check_clicked(self):
+        """Handle Overlap Check button click - highlight all polygon overlaps"""
+        if not self.canvas_container.canvas.polygons:
+            QMessageBox.information(self, "Info", "No tiles loaded to check overlaps.")
+            return
+        
+        # Toggle overlap check mode
+        if hasattr(self.canvas_container.canvas, 'overlap_check_mode') and self.canvas_container.canvas.overlap_check_mode:
+            # Turn off overlap check mode
+            self.canvas_container.canvas.overlap_check_mode = False
+            self.overlap_btn.setText("Overlap Check")
+            self.overlap_btn.setStyleSheet("")
+            self.canvas_container.canvas.overlap_highlights = []
+        else:
+            # Turn on overlap check mode
+            self.overlap_btn.setText("Processing...")
+            self.overlap_btn.setEnabled(False)
+            QApplication.processEvents()
+            
+            # Find overlapping polygons
+            overlap_pairs = self.find_overlapping_polygons()
+            
+            # Store highlights and enable overlap check mode
+            self.canvas_container.canvas.overlap_highlights = overlap_pairs
+            self.canvas_container.canvas.overlap_check_mode = True
+            
+            # Update button appearance
+            self.overlap_btn.setText("Hide Overlaps")
+            self.overlap_btn.setStyleSheet("background-color: #ffcccc;")  # Light red background
+            self.overlap_btn.setEnabled(True)
+            
+            # Show results
+            total_polygons_affected = len(set([idx for pair in overlap_pairs for idx in pair]))
+            QMessageBox.information(
+                self, 
+                "Overlap Check Results", 
+                f"Found {len(overlap_pairs)} overlap pairs.\n"
+                f"{total_polygons_affected} polygons are involved in overlaps.\n"
+                f"Overlapping polygons are highlighted with thick red outlines."
+            )
+        
+        # Refresh the display
+        self.canvas_container.canvas.invalidate_cache()
+        self.canvas_container.canvas.update()
+
+    def find_overlapping_polygons(self):
+        """
+        Find all pairs of overlapping polygons using an efficient spatial index (R-tree).
+        This check includes the thickness of the polygon frames (edge_width).
+        """
+        from shapely.strtree import STRtree
+        import time
+
+        start_time = time.time()
+        overlap_pairs = []
+        polygons = self.canvas_container.canvas.polygons
+        edge_width = self.canvas_container.canvas.edge_width
+        
+        if not polygons:
+            return []
+
+        # The buffer amount is half the edge width, to account for the stroke
+        buffer_amount = edge_width / 2.0
+        print(f"Starting overlap check for {len(polygons)} polygons using STRtree with edge_width {edge_width} (buffer: {buffer_amount})...")
+
+        # Create a list of buffered polygons for the check
+        # We only buffer valid polygons
+        original_indices = [i for i, p in enumerate(polygons) if p.is_valid]
+        buffered_polygons = [polygons[i].buffer(buffer_amount) for i in original_indices]
+
+        if not buffered_polygons:
+            print("No valid polygons to check.")
+            return []
+
+        # Create a spatial index (R-tree) for the buffered polygons
+        try:
+            tree = STRtree(buffered_polygons)
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to create spatial index. Is 'rtree' installed?\nError: {e}")
+            return []
+
+        processed_pairs = set()
+        actual_overlap_checks = 0
+
+        for i_buffered, poly1_buffered in enumerate(buffered_polygons):
+            
+            if i_buffered % 100 == 0 and i_buffered > 0:
+                print(f"Processing polygon {i_buffered}/{len(buffered_polygons)}")
+
+            # Query the tree for polygons that potentially intersect with the buffered polygon's bounding box
+            possible_matches_indices = tree.query(poly1_buffered)
+
+            for j_buffered in possible_matches_indices:
+                # Don't compare a polygon with itself
+                if i_buffered == j_buffered:
+                    continue
+
+                # Get original indices from our map
+                i_original = original_indices[i_buffered]
+                j_original = original_indices[j_buffered]
+
+                # Avoid duplicate checks (e.g., (1, 2) and (2, 1))
+                pair = tuple(sorted((i_original, j_original)))
+                if pair in processed_pairs:
+                    continue
+                
+                processed_pairs.add(pair)
+                actual_overlap_checks += 1
+
+                poly2_buffered = buffered_polygons[j_buffered]
+
+                try:
+                    # Perform the more expensive intersection check on the buffered polygons
+                    if poly1_buffered.intersects(poly2_buffered):
+                        # Make sure they actually share area (not just touch at a boundary)
+                        intersection = poly1_buffered.intersection(poly2_buffered)
+                        if hasattr(intersection, 'area') and intersection.area > 0.01:
+                            overlap_pairs.append((i_original, j_original))
+                except Exception:
+                    # Skip problematic polygon pairs
+                    continue
+        
+        end_time = time.time()
+        print(f"Overlap check completed in {end_time - start_time:.2f} seconds")
+        print(f"Total comparisons (after spatial index): {actual_overlap_checks}")
+        print(f"Found {len(overlap_pairs)} overlapping pairs")
+        
+        return overlap_pairs
+
+    def bounding_boxes_overlap(self, bounds1, bounds2):
+        """Check if two bounding boxes overlap"""
+        # bounds format: (minx, miny, maxx, maxy)
+        return not (bounds1[2] < bounds2[0] or bounds2[2] < bounds1[0] or
+                   bounds1[3] < bounds2[1] or bounds2[3] < bounds1[1])
+
     def save_visible_array(self):
         """Save visible polygons to CSV file in the same format as uploaded"""
         if not self.canvas_container.canvas.polygons:
@@ -3616,6 +3773,8 @@ class MosaicEditor(QMainWindow):
         
         try:
             with open(filename, 'w', newline='', encoding='utf-8') as csvfile:
+                import csv
+                import json
                 writer = csv.writer(csvfile)
                 
                 # Write header with alpha channel support
@@ -3647,22 +3806,11 @@ class MosaicEditor(QMainWindow):
             QMessageBox.critical(self, "Error", f"Failed to save file: {str(e)}")
 
 
-def main():
-    """Main function"""
+if __name__ == "__main__":
+    import sys
+    from PyQt5.QtWidgets import QApplication
+    
     app = QApplication(sys.argv)
-    app.setApplicationName("Mosaic Editor")
-    app.setOrganizationName("Mosaic Tools")
-    
-    # Set application style
-    app.setStyle('Fusion')
-    
-    # Create and show main window
     window = MosaicEditor()
     window.show()
-    
-    # Start event loop
     sys.exit(app.exec_())
-
-
-if __name__ == '__main__':
-    main()
