@@ -10,7 +10,7 @@ import numpy as np
 import cv2
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                            QHBoxLayout, QPushButton, QFileDialog, QLabel, 
-                           QMessageBox, QCheckBox, QLineEdit)
+                           QMessageBox, QCheckBox, QLineEdit, QDialog)
 from PyQt5.QtCore import Qt, QPointF, QRect
 from PyQt5.QtGui import QPainter, QPen, QBrush, QColor, QPolygonF, QFont, QWheelEvent
 from shapely.geometry import Polygon
@@ -951,6 +951,61 @@ class ControlPanel(QWidget):
         if not output_dir:
             return  # User cancelled dialog
         
+        # Ask user about fillet options
+        fillet_dialog = QDialog(self)
+        fillet_dialog.setWindowTitle("Fillet Options")
+        fillet_dialog.setModal(True)
+        fillet_dialog.resize(300, 150)
+        
+        layout = QVBoxLayout(fillet_dialog)
+        
+        # Checkbox for enabling fillet
+        fillet_checkbox = QCheckBox("Apply fillet to polygon corners")
+        layout.addWidget(fillet_checkbox)
+        
+        # Radius input
+        radius_layout = QHBoxLayout()
+        radius_label = QLabel("Fillet radius:")
+        radius_input = QLineEdit("2.0")  # Default 2.0 units
+        radius_input.setEnabled(False)  # Initially disabled
+        radius_layout.addWidget(radius_label)
+        radius_layout.addWidget(radius_input)
+        layout.addLayout(radius_layout)
+        
+        # Enable/disable radius input based on checkbox
+        def on_checkbox_changed(checked):
+            radius_input.setEnabled(checked)
+        fillet_checkbox.stateChanged.connect(on_checkbox_changed)
+        
+        # Buttons
+        buttons_layout = QHBoxLayout()
+        ok_button = QPushButton("OK")
+        cancel_button = QPushButton("Cancel")
+        buttons_layout.addWidget(ok_button)
+        buttons_layout.addWidget(cancel_button)
+        layout.addLayout(buttons_layout)
+        
+        # Button connections
+        ok_button.clicked.connect(fillet_dialog.accept)
+        cancel_button.clicked.connect(fillet_dialog.reject)
+        
+        # Show dialog and get result
+        if fillet_dialog.exec_() != QDialog.Accepted:
+            return  # User cancelled
+        
+        # Get fillet settings
+        apply_fillet = fillet_checkbox.isChecked()
+        fillet_radius = 0.0
+        if apply_fillet:
+            try:
+                fillet_radius = float(radius_input.text())
+                if fillet_radius <= 0:
+                    QMessageBox.warning(self, "Invalid Input", "Fillet radius must be greater than 0.")
+                    return
+            except ValueError:
+                QMessageBox.warning(self, "Invalid Input", "Please enter a valid number for fillet radius.")
+                return
+        
         # Disable Save Boxes button during processing
         self.save_boxes_btn.setEnabled(False)
         self.save_boxes_btn.setText("Saving...")
@@ -1015,14 +1070,21 @@ class ControlPanel(QWidget):
                     if not os.path.exists(box_dir):
                         os.makedirs(box_dir)
                     
-                    # Save box CSV file
+                    # Apply fillet to polygons if requested
+                    processed_polygons = []
+                    for polygon in data['polygons']:
+                        if apply_fillet and fillet_radius > 0:
+                            polygon = self.apply_fillet_to_polygon(polygon, fillet_radius)
+                        processed_polygons.append(polygon)
+                    
+                    # Save box CSV file (with filleted polygons if requested)
                     csv_filename = os.path.join(box_dir, f"box_{box_label}.csv")
-                    self.save_box_csv(csv_filename, data['polygons'], data['colors'])
+                    self.save_box_csv(csv_filename, processed_polygons, data['colors'])
                     saved_files.append(csv_filename)
                     
-                    # Prepare polygon data for DXF export
+                    # Prepare polygon data for DXF export (using filleted polygons)
                     polygons_data = []
-                    for i, (polygon, color) in enumerate(zip(data['polygons'], data['colors'])):
+                    for i, (polygon, color) in enumerate(zip(processed_polygons, data['colors'])):
                         # Use original color for DXF files (before Cut operation)
                         original_color = color  # Default to current color
                         if hasattr(self.canvas, 'original_colors') and len(self.canvas.original_colors) > 0:
@@ -1249,6 +1311,25 @@ class ControlPanel(QWidget):
                     
         except Exception as e:
             print(f"Failed to save general CSV files: {str(e)}")
+    
+    def apply_fillet_to_polygon(self, polygon, radius):
+        """Apply fillet (rounded corners) to a polygon using buffer operations"""
+        try:
+            if radius <= 0:
+                return polygon
+            
+            # Apply negative buffer then positive buffer to create fillet effect
+            # This rounds both inner and outer corners
+            filleted = polygon.buffer(-radius).buffer(radius)
+            
+            # If the result is empty or invalid, return original
+            if filleted.is_empty or not filleted.is_valid:
+                return polygon
+            
+            return filleted
+        except Exception as e:
+            print(f"Error applying fillet to polygon: {e}")
+            return polygon
     
     def save_box_csv(self, filename, polygons, colors):
         """Save polygons and colors to a CSV file"""

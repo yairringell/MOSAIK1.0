@@ -267,7 +267,6 @@ class MosaicCanvas(QWidget):
         self.grid_dragging = False  # Whether we're dragging the grid
         self.grid_drag_start = None  # Starting point for grid drag
         self.grid_drag_world_start = None  # Starting world coordinates for grid drag
-        self.cut_tiles_applied = False  # Whether Cut Tiles has been applied (for grid box fill colors)
         
         # Zoom and pan variables
         self.scale_factor = 1.0
@@ -721,10 +720,6 @@ class MosaicCanvas(QWidget):
         
         # Set up optimized rendering
         painter.save()
-        
-        # Draw grid box fills BEFORE polygons if Cut Tiles has been applied
-        if hasattr(self, 'cut_tiles_applied') and self.cut_tiles_applied:
-            self.draw_grid_box_fills(painter)
         
         # Draw only visible polygons
         polygons_drawn = 0
@@ -2191,31 +2186,24 @@ class MosaicEditor(QMainWindow):
         self.reduce_colors_btn.setToolTip("Reduce all tile colors to 16 dominant colors using OpenCV")
         left_panel_layout.addWidget(self.reduce_colors_btn)
         
-        # Cut button
-        self.cut_btn = QPushButton("Cut")
-        self.cut_btn.setToolTip("Color tiles by grid box - each box gets a distinct color")
-        left_panel_layout.addWidget(self.cut_btn)
-        
-        # Cut Plates button (initially disabled)
-        self.cut_tiles_btn = QPushButton("Cut Plates")
-        self.cut_tiles_btn.setToolTip("Fill each grid box with its assigned color and update tile frames")
-        self.cut_tiles_btn.setEnabled(False)  # Disabled until Cut is used
-        left_panel_layout.addWidget(self.cut_tiles_btn)
-        
-        # Save Boxes button
-        self.save_boxes_btn = QPushButton("Save Boxes")
-        self.save_boxes_btn.setToolTip("Save each grid box's polygons to separate CSV files")
-        left_panel_layout.addWidget(self.save_boxes_btn)
-        
-        # Save Plates button
-        self.save_plates_btn = QPushButton("Save Plates")
-        self.save_plates_btn.setToolTip("Save detected blob contours as DXF files with frames")
-        left_panel_layout.addWidget(self.save_plates_btn)
-        
         # Overlap button
         self.overlap_btn = QPushButton("Overlap Check")
         self.overlap_btn.setToolTip("Highlight all polygon overlaps with red outlines")
         left_panel_layout.addWidget(self.overlap_btn)
+        
+        # Scale factor input
+        scale_label = QLabel("Scale Factor (%):")
+        left_panel_layout.addWidget(scale_label)
+        
+        self.scale_factor_input = QLineEdit("95")
+        self.scale_factor_input.setToolTip("Enter scale factor as percentage (e.g., 90 for 90%, 110 for 110%)")
+        self.scale_factor_input.setMaximumWidth(80)
+        left_panel_layout.addWidget(self.scale_factor_input)
+        
+        # Scale button
+        self.scale_btn = QPushButton("Scale")
+        self.scale_btn.setToolTip("Scale all polygons by the specified factor")
+        left_panel_layout.addWidget(self.scale_btn)
         
         # Add stretch to push buttons to top
         left_panel_layout.addStretch()
@@ -2277,11 +2265,8 @@ class MosaicEditor(QMainWindow):
         self.colorize_btn.clicked.connect(self.on_colorize_clicked)
         self.choose_palette_btn.clicked.connect(self.on_choose_palette_clicked)
         self.reduce_colors_btn.clicked.connect(self.on_reduce_colors_clicked)
-        self.cut_btn.clicked.connect(self.on_cut_clicked)
-        self.cut_tiles_btn.clicked.connect(self.on_cut_tiles_clicked)
-        self.save_boxes_btn.clicked.connect(self.on_save_boxes_clicked)
-        self.save_plates_btn.clicked.connect(self.on_save_plates_clicked)
         self.overlap_btn.clicked.connect(self.on_overlap_check_clicked)
+        self.scale_btn.clicked.connect(self.on_scale_clicked)
         
         # Color palette signals
         self.color_palette.color_selected.connect(self.on_color_selected)
@@ -2319,12 +2304,6 @@ class MosaicEditor(QMainWindow):
                     os.path.basename(filename)
                 )
                 self.setWindowTitle(f"Mosaic Editor - {os.path.basename(filename)}")
-                
-                # Disable Cut Tiles button when loading new file (Cut operation data is now invalid)
-                self.cut_tiles_btn.setEnabled(False)
-                
-                # Reset Cut Tiles applied flag when loading new file
-                self.canvas_container.canvas.cut_tiles_applied = False
                 
                 # Update scale bars
                 self.canvas_container.update_scale_bars()
@@ -2598,622 +2577,36 @@ class MosaicEditor(QMainWindow):
         # Update canvas display
         self.canvas_container.canvas.update()
 
-    def on_cut_clicked(self):
-        """Handle Cut button click - color tiles by grid box assignment"""
-        if not self.canvas_container.canvas.polygons:
-            return
-        
-        # Disable Cut button to prevent multiple simultaneous executions
-        self.cut_btn.setEnabled(False)
-        self.cut_btn.setText("Processing...")
-        # Force UI update to show the disabled state immediately
-        QApplication.processEvents()
-        
-        # Count how many tiles will be processed
-        total_tiles = len(self.canvas_container.canvas.polygons)
-        
-        # Store current colors (which may have been modified by colorize/reduce colors) 
-        # as the base colors for CSV files - this ensures colorize/reduce changes are preserved
-        self.original_colors = self.canvas_container.canvas.colors.copy()
-        
-        # Define 36 distinct colors for the 6x6 grid (easy to distinguish)
-        grid_colors = [
-            QColor(255, 0, 0),     # Red
-            QColor(0, 255, 0),     # Green  
-            QColor(0, 0, 255),     # Blue
-            QColor(255, 255, 0),   # Yellow
-            QColor(255, 0, 255),   # Magenta
-            QColor(0, 255, 255),   # Cyan
-            QColor(255, 128, 0),   # Orange
-            QColor(128, 0, 255),   # Purple
-            QColor(0, 255, 128),   # Spring Green
-            QColor(255, 0, 128),   # Rose
-            QColor(128, 255, 0),   # Lime
-            QColor(0, 128, 255),   # Sky Blue
-            QColor(255, 64, 64),   # Light Red
-            QColor(64, 255, 64),   # Light Green
-            QColor(64, 64, 255),   # Light Blue
-            QColor(255, 255, 128), # Light Yellow
-            QColor(255, 128, 255), # Light Magenta
-            QColor(128, 255, 255), # Light Cyan
-            QColor(192, 0, 0),     # Dark Red
-            QColor(0, 192, 0),     # Dark Green
-            QColor(0, 0, 192),     # Dark Blue
-            QColor(192, 192, 0),   # Dark Yellow
-            QColor(192, 0, 192),   # Dark Magenta
-            QColor(0, 192, 192),   # Dark Cyan
-            QColor(255, 192, 128), # Peach
-            QColor(192, 128, 255), # Lavender
-            QColor(128, 255, 192), # Mint
-            QColor(255, 128, 192), # Pink
-            QColor(192, 255, 128), # Light Lime
-            QColor(128, 192, 255), # Light Sky
-            QColor(128, 128, 128), # Gray
-            QColor(64, 64, 64),    # Dark Gray
-            QColor(160, 160, 160), # Light Gray
-            QColor(96, 96, 96),    # Medium Gray
-            QColor(224, 224, 224), # Very Light Gray
-            QColor(32, 32, 32)     # Very Dark Gray
-        ]
-        
-        # Get grid parameters
-        cell_size_world = self.canvas_container.canvas.grid_size
-        grid_x_world = self.canvas_container.canvas.grid_offset_x
-        grid_y_world = self.canvas_container.canvas.grid_offset_y
-        
-        tiles_assigned = 0
-        
-        # Track which grid boxes have polygons (for optimized blob detection)
-        boxes_with_polygons = set()
-        
-        # Process each tile
-        for i, polygon in enumerate(self.canvas_container.canvas.polygons):
-            # Calculate which grid box this tile belongs to based on area overlap
-            box_index = self.calculate_dominant_grid_box(polygon, grid_x_world, grid_y_world, cell_size_world)
-            
-            if box_index >= 0:  # Valid box assignment
-                # Assign color based on grid box
-                self.canvas_container.canvas.colors[i] = grid_colors[box_index % len(grid_colors)]
-                boxes_with_polygons.add(box_index)  # Track boxes with polygons
-                tiles_assigned += 1
-        
-        # Store boxes with polygons for Cut Plates optimization
-        self.canvas_container.canvas.boxes_with_polygons = boxes_with_polygons
-        
-        # Update the display
-        self.canvas_container.canvas.invalidate_cache()
-        self.canvas_container.canvas.update()
-        
-        # Enable Cut Tiles button after Cut operation
-        self.cut_tiles_btn.setEnabled(True)
-        
-        # Re-enable Cut button after operation is complete
-        self.cut_btn.setEnabled(True)
-        self.cut_btn.setText("Cut")
-        # Force UI update to show the re-enabled state
-        QApplication.processEvents()
-    
-    def calculate_dominant_grid_box(self, polygon, grid_x, grid_y, cell_size):
-        """Calculate which grid box contains most of the polygon's area"""
-        from shapely.geometry import Polygon as ShapelyPolygon, box
-        
-        # The polygon is already a Shapely polygon
-        try:
-            if not polygon.is_valid:
-                return -1
-        except:
-            return -1
-        
-        max_overlap_area = 0
-        best_box_index = -1
-        
-        # Check overlap with each of the 36 grid boxes (6x6)
-        for row in range(6):
-            for col in range(6):
-                # Calculate box bounds
-                box_x1 = grid_x + col * cell_size
-                box_y1 = grid_y + row * cell_size
-                box_x2 = box_x1 + cell_size
-                box_y2 = box_y1 + cell_size
-                
-                # Create box geometry
-                grid_box = box(box_x1, box_y1, box_x2, box_y2)
-                
-                try:
-                    # Calculate intersection area
-                    intersection = polygon.intersection(grid_box)
-                    overlap_area = intersection.area
-                    
-                    if overlap_area > max_overlap_area:
-                        max_overlap_area = overlap_area
-                        best_box_index = row * 6 + col  # Convert 2D index to 1D
-                except:
-                    continue
-        
-        return best_box_index
-    
-    def on_cut_tiles_clicked(self):
-        """Handle Cut Tiles button click - fill each grid box with its assigned color and update tile frames"""
-        if not self.canvas_container.canvas.polygons:
-            return
-        
-        # Disable Cut Plates button to prevent multiple simultaneous executions
-        self.cut_tiles_btn.setEnabled(False)
-        self.cut_tiles_btn.setText("Processing...")
-        # Force UI update to show the disabled state immediately
-        QApplication.processEvents()
-        
-        # Get grid parameters
-        cell_size_world = self.canvas_container.canvas.grid_size
-        grid_x_world = self.canvas_container.canvas.grid_offset_x
-        grid_y_world = self.canvas_container.canvas.grid_offset_y
-        
-        # Define 36 rainbow colors with maximum distinction for better OpenCV detection
-        grid_colors = [
-            QColor(255, 0, 0),     # Pure Red
-            QColor(255, 165, 0),   # Orange  
-            QColor(255, 255, 0),   # Yellow
-            QColor(128, 255, 0),   # Yellow-Green
-            QColor(0, 255, 0),     # Pure Green
-            QColor(0, 255, 128),   # Green-Cyan
-            QColor(0, 255, 255),   # Cyan
-            QColor(0, 128, 255),   # Light Blue
-            QColor(0, 0, 255),     # Pure Blue
-            QColor(128, 0, 255),   # Blue-Violet
-            QColor(255, 0, 255),   # Magenta
-            QColor(255, 0, 128),   # Pink
-            QColor(128, 0, 0),     # Dark Red
-            QColor(128, 82, 0),    # Dark Orange
-            QColor(128, 128, 0),   # Dark Yellow/Olive
-            QColor(64, 128, 0),    # Dark Yellow-Green
-            QColor(0, 128, 0),     # Dark Green
-            QColor(0, 128, 64),    # Dark Green-Cyan
-            QColor(0, 128, 128),   # Dark Cyan/Teal
-            QColor(0, 64, 128),    # Dark Light Blue
-            QColor(0, 0, 128),     # Dark Blue/Navy
-            QColor(64, 0, 128),    # Dark Violet
-            QColor(128, 0, 128),   # Dark Magenta
-            QColor(128, 0, 64),    # Dark Pink
-            QColor(255, 128, 128), # Light Red
-            QColor(255, 192, 128), # Light Orange
-            QColor(255, 255, 128), # Light Yellow
-            QColor(192, 255, 128), # Light Yellow-Green
-            QColor(128, 255, 128), # Light Green
-            QColor(128, 255, 192), # Light Green-Cyan
-            QColor(128, 255, 255), # Light Cyan
-            QColor(128, 192, 255), # Light Blue
-            QColor(128, 128, 255), # Light Blue-Purple
-            QColor(192, 128, 255), # Light Violet
-            QColor(255, 128, 255), # Light Magenta
-            QColor(255, 128, 192)  # Light Pink
-        ]
-        
-        tiles_processed = 0
-        
-        # Process each tile
-        for i, polygon in enumerate(self.canvas_container.canvas.polygons):
-            # Calculate which grid box this tile belongs to
-            box_index = self.calculate_dominant_grid_box(polygon, grid_x_world, grid_y_world, cell_size_world)
-            
-            if box_index >= 0:  # Valid box assignment
-                # Get the assigned color for this box
-                assigned_color = grid_colors[box_index % len(grid_colors)]
-                
-                # Update both fill color and frame color to match the box color
-                if i < len(self.canvas_container.canvas.colors):
-                    self.canvas_container.canvas.colors[i] = assigned_color
-                
-                if i < len(self.canvas_container.canvas.edge_colors):
-                    self.canvas_container.canvas.edge_colors[i] = assigned_color
-                
-                tiles_processed += 1
-        
-        # Update the display
-        self.canvas_container.canvas.invalidate_cache()
-        self.canvas_container.canvas.update()
-        
-        # Set flag to indicate Cut Tiles has been applied (for grid box fill colors)
-        self.canvas_container.canvas.cut_tiles_applied = True
-        
-        # Re-enable Cut Plates button after operation is complete
-        self.cut_tiles_btn.setEnabled(True)
-        self.cut_tiles_btn.setText("Cut Plates")
-        # Force UI update to show the re-enabled state
-        QApplication.processEvents()
-
-    def on_save_boxes_clicked(self):
-        """Handle Save Boxes button click - save each grid box's polygons to separate CSV files"""
-        if not self.canvas_container.canvas.polygons:
-            QMessageBox.information(self, "Info", "No tiles loaded to save.")
-            return
-        
-        # Disable Save Boxes button to prevent multiple simultaneous executions
-        self.save_boxes_btn.setEnabled(False)
-        self.save_boxes_btn.setText("Processing...")
-        # Force UI update to show the disabled state immediately
-        QApplication.processEvents()
-        
-        # Let user choose the output folder
-        folder_path = QFileDialog.getExistingDirectory(
-            self, 
-            "Choose Folder to Save Grid Box CSV Files",
-            "",
-            QFileDialog.ShowDirsOnly | QFileDialog.DontResolveSymlinks
-        )
-        
-        if not folder_path:
-            # Re-enable button if user cancels
-            self.save_boxes_btn.setEnabled(True)
-            self.save_boxes_btn.setText("Save Boxes")
-            return  # User cancelled
-        
-        # Get grid parameters
-        cell_size_world = self.canvas_container.canvas.grid_size
-        grid_x_world = self.canvas_container.canvas.grid_offset_x
-        grid_y_world = self.canvas_container.canvas.grid_offset_y
-        
-        # Initialize original colors if not available (in case Cut wasn't used)
-        if not hasattr(self, 'original_colors') or len(self.original_colors) != len(self.canvas_container.canvas.colors):
-            self.original_colors = self.canvas_container.canvas.colors.copy()
-        
-        # Dictionary to store polygons for each grid box
-        box_polygons = {}
-        tiles_processed = 0
-        tiles_assigned = 0
-        
-        # Process each tile and assign to grid boxes
-        for i, polygon in enumerate(self.canvas_container.canvas.polygons):
-            tiles_processed += 1
-            
-            # Calculate which grid box this tile belongs to
-            box_index = self.calculate_dominant_grid_box(polygon, grid_x_world, grid_y_world, cell_size_world)
-            
-            if box_index >= 0:  # Valid box assignment
-                if box_index not in box_polygons:
-                    box_polygons[box_index] = []
-                
-                # Store polygon with its color
-                color = self.canvas_container.canvas.colors[i] if i < len(self.canvas_container.canvas.colors) else QColor(0, 0, 0)
-                
-                # Get original color if available (for manufacturing DXF files)
-                original_color = color  # Default to current color
-                if hasattr(self, 'original_colors') and i < len(self.original_colors):
-                    original_color = self.original_colors[i]
-                
-                box_polygons[box_index].append({
-                    'polygon': polygon,
-                    'color': color,
-                    'original_color': original_color,
-                    'original_index': i
-                })
-                tiles_assigned += 1
-        
-        # Save CSV files and DXF files for each grid box
-        files_saved = 0
-        dxf_files_saved = 0
-        folders_created = 0
-        
-        for box_index, polygons_data in box_polygons.items():
-            # Convert box index to row/column (A1, A2, etc.)
-            row = box_index // 6
-            col = box_index % 6
-            box_name = f"{chr(ord('A') + row)}{col + 1}"
-            
-            # Create folder for this box
-            box_folder_path = f"{folder_path}/{box_name}"
-            try:
-                import os
-                os.makedirs(box_folder_path, exist_ok=True)
-                folders_created += 1
-            except Exception as e:
-                QMessageBox.warning(self, "Error", f"Failed to create folder {box_name}: {str(e)}")
-                continue
-            
-            # Create filenames in the box folder
-            csv_filename = f"box_{box_name}.csv"
-            dxf_filename = f"box_{box_name}.dxf"
-            csv_filepath = f"{box_folder_path}/{csv_filename}"
-            dxf_filepath = f"{box_folder_path}/{dxf_filename}"
-            
-            # Save CSV file
-            try:
-                with open(csv_filepath, 'w', newline='', encoding='utf-8') as csvfile:
-                    import csv
-                    import json
-                    
-                    writer = csv.writer(csvfile)
-                    
-                    # Write header (same format as save_visible_array)
-                    writer.writerow(['polygon_id', 'coordinates', 'color_r', 'color_g', 'color_b', 'color_a'])
-                    
-                    # Write each polygon
-                    for poly_id, poly_data in enumerate(polygons_data):
-                        polygon = poly_data['polygon']
-                        # Use original color (before Cut operation) for CSV files
-                        original_color = poly_data.get('original_color', poly_data['color'])
-                        
-                        # Extract coordinates as a list of [x, y] pairs (same format as save_visible_array)
-                        coords = list(polygon.exterior.coords)
-                        coords_json = json.dumps([[float(x), float(y)] for x, y in coords])
-                        
-                        # Extract RGBA values (convert from QColor to 0-1 range, same as save_visible_array)
-                        r = original_color.red() / 255.0
-                        g = original_color.green() / 255.0
-                        b = original_color.blue() / 255.0
-                        a = original_color.alpha() / 255.0
-                        
-                        # Write row
-                        writer.writerow([poly_id, coords_json, r, g, b, a])
-                
-                files_saved += 1
-                
-            except Exception as e:
-                QMessageBox.warning(self, "Error", f"Failed to save CSV {csv_filename}: {str(e)}")
-                continue
-            
-            # Save DXF files - main box file and separate files for each color
-            try:
-                # Save main DXF file with all polygons
-                self.save_polygons_to_dxf(polygons_data, dxf_filepath, box_name, box_index)
-                dxf_files_saved += 1
-                
-                # Group polygons by original color (for manufacturing accuracy)
-                color_groups = {}
-                for poly_data in polygons_data:
-                    original_color = poly_data.get('original_color', poly_data['color'])
-                    color_hex = original_color.name()  # Get hex color like #FF0000
-                    
-                    if color_hex not in color_groups:
-                        color_groups[color_hex] = []
-                    
-                    # Use original color for the DXF file
-                    poly_data_copy = poly_data.copy()
-                    poly_data_copy['color'] = original_color
-                    color_groups[color_hex].append(poly_data_copy)
-                
-                # Save separate DXF file for each color
-                for color_hex, color_polygons in color_groups.items():
-                    color_dxf_filename = f"{box_name}_{color_hex}.dxf"
-                    color_dxf_filepath = f"{box_folder_path}/{color_dxf_filename}"
-                    
-                    try:
-                        self.save_polygons_to_dxf(color_polygons, color_dxf_filepath, f"{box_name} - {color_hex}", box_index)
-                        dxf_files_saved += 1
-                    except Exception as e:
-                        QMessageBox.warning(self, "Error", f"Failed to save color DXF {color_dxf_filename}: {str(e)}")
-                        continue
-                
-            except Exception as e:
-                QMessageBox.warning(self, "Error", f"Failed to save DXF {dxf_filename}: {str(e)}")
-                continue
-        
-        # Create general CSV file with all polygons and color area summary
-        try:
-            general_csv_path = f"{folder_path}/all_polygons_general.csv"
-            color_areas = {}  # Dictionary to store total area for each color
-            
-            with open(general_csv_path, 'w', newline='', encoding='utf-8') as csvfile:
-                import csv
-                import json
-                
-                writer = csv.writer(csvfile)
-                
-                # Write header
-                writer.writerow(['polygon_id', 'box_name', 'coordinates', 'color_r', 'color_g', 'color_b', 'color_a', 'area'])
-                
-                # Write all polygons from all boxes
-                global_polygon_id = 0
-                for box_index, polygons_data in box_polygons.items():
-                    # Convert box index to row/column (A1, A2, etc.)
-                    row = box_index // 6
-                    col = box_index % 6
-                    box_name = f"{chr(ord('A') + row)}{col + 1}"
-                    
-                    for poly_data in polygons_data:
-                        polygon = poly_data['polygon']
-                        original_color = poly_data.get('original_color', poly_data['color'])
-                        
-                        # Calculate area
-                        poly_area = polygon.area
-                        
-                        # Track color areas
-                        color_key = original_color.name()  # Get hex color like #FF0000
-                        if color_key not in color_areas:
-                            color_areas[color_key] = 0
-                        color_areas[color_key] += poly_area
-                        
-                        # Extract coordinates
-                        coords = list(polygon.exterior.coords)
-                        coords_json = json.dumps([[float(x), float(y)] for x, y in coords])
-                        
-                        # Extract RGBA values
-                        r = original_color.red() / 255.0
-                        g = original_color.green() / 255.0
-                        b = original_color.blue() / 255.0
-                        a = original_color.alpha() / 255.0
-                        
-                        # Write polygon row
-                        writer.writerow([global_polygon_id, box_name, coords_json, r, g, b, a, poly_area])
-                        global_polygon_id += 1
-                
-                # Add separator and color area summary
-                writer.writerow([])  # Empty row
-                writer.writerow(['COLOR AREA SUMMARY'])
-                writer.writerow(['Color (Hex)', 'Total Area'])
-                
-                # Sort colors by total area (descending)
-                sorted_colors = sorted(color_areas.items(), key=lambda x: x[1], reverse=True)
-                
-                for color_hex, total_area in sorted_colors:
-                    writer.writerow([color_hex, total_area])
-                
-                # Add total area of all polygons
-                total_all_areas = sum(color_areas.values())
-                writer.writerow([])  # Empty row
-                writer.writerow(['TOTAL AREA (ALL COLORS)', total_all_areas])
-            
-            files_saved += 1
-            
-        except Exception as e:
-            QMessageBox.warning(self, "Error", f"Failed to save general CSV file: {str(e)}")
-        
-        # Show completion message
-        QMessageBox.information(
-            self, 
-            "Save Complete", 
-            f"Successfully saved:\n"
-            f"• {folders_created} grid box folders\n"
-            f"• {files_saved} CSV files (including general file)\n"
-            f"• {dxf_files_saved} DXF files\n"
-            f"• Processed {tiles_processed} tiles, assigned {tiles_assigned} to boxes"
-        )
-        
-        # Re-enable Save Boxes button after operation is complete
-        self.save_boxes_btn.setEnabled(True)
-        self.save_boxes_btn.setText("Save Boxes")
-        # Force UI update to show the re-enabled state
-        QApplication.processEvents()
-
-    def save_polygons_to_dxf(self, polygons_data, dxf_filepath, box_name, box_index=None):
-        """Save polygons to DXF file format with frame based on grid box dimensions"""
-        # Create a simple DXF file manually (without external dependencies)
-        with open(dxf_filepath, 'w', encoding='utf-8') as f:
-            # DXF header
-            f.write("0\nSECTION\n2\nHEADER\n9\n$ACADVER\n1\nAC1015\n0\nENDSEC\n")
-            
-            # Tables section
-            f.write("0\nSECTION\n2\nTABLES\n")
-            
-            # Layer table
-            f.write("0\nTABLE\n2\nLAYER\n70\n1\n")
-            f.write("0\nLAYER\n2\n0\n70\n0\n6\nCONTINUOUS\n62\n7\n")
-            f.write("0\nENDTAB\n")
-            
-            f.write("0\nENDSEC\n")
-            
-            # Entities section
-            f.write("0\nSECTION\n2\nENTITIES\n")
-            
-            # Add title text
-            f.write(f"0\nTEXT\n8\n0\n10\n0.0\n20\n0.0\n30\n0.0\n40\n10.0\n1\nGrid Box {box_name}\n")
-            
-            # Calculate frame based on grid box dimensions + 20 pixel margin
-            if box_index is not None:
-                # Get grid parameters
-                cell_size_world = self.canvas_container.canvas.grid_size
-                grid_x_world = self.canvas_container.canvas.grid_offset_x
-                grid_y_world = self.canvas_container.canvas.grid_offset_y
-                
-                # Calculate grid box position
-                row = box_index // 6
-                col = box_index % 6
-                
-                # Calculate original grid box bounds
-                box_min_x = grid_x_world + col * cell_size_world
-                box_min_y = grid_y_world + row * cell_size_world
-                box_max_x = box_min_x + cell_size_world
-                box_max_y = box_min_y + cell_size_world
-                
-                # Add 20 pixels margin on each side for the frame
-                frame_margin = 20
-                frame_min_x = box_min_x - frame_margin
-                frame_min_y = box_min_y - frame_margin
-                frame_max_x = box_max_x + frame_margin
-                frame_max_y = box_max_y + frame_margin
-                
-            elif polygons_data:
-                # Fallback: calculate from polygons if box_index not provided
-                min_x = float('inf')
-                min_y = float('inf')
-                max_x = float('-inf')
-                max_y = float('-inf')
-                
-                # Find bounds of all polygons
-                for poly_data in polygons_data:
-                    polygon = poly_data['polygon']
-                    bounds = polygon.bounds  # (minx, miny, maxx, maxy)
-                    min_x = min(min_x, bounds[0])
-                    min_y = min(min_y, bounds[1])
-                    max_x = max(max_x, bounds[2])
-                    max_y = max(max_y, bounds[3])
-                
-                # Add 20 pixels margin on each side for the frame
-                frame_margin = 20
-                frame_min_x = min_x - frame_margin
-                frame_min_y = min_y - frame_margin
-                frame_max_x = max_x + frame_margin
-                frame_max_y = max_y + frame_margin
-            else:
-                # No frame if no data
-                frame_min_x = frame_min_y = frame_max_x = frame_max_y = 0
-            
-            # Draw frame as a rectangle (LWPOLYLINE) if we have valid frame dimensions
-            if (box_index is not None) or polygons_data:
-                f.write("0\nLWPOLYLINE\n")
-                f.write("8\n0\n")  # Layer
-                f.write("62\n8\n")  # Color (dark gray for frame)
-                f.write("90\n4\n")  # 4 vertices for rectangle
-                f.write("70\n1\n")  # Closed polyline
-                
-                # Write frame vertices (clockwise from bottom-left)
-                f.write(f"10\n{frame_min_x:.6f}\n20\n{frame_min_y:.6f}\n")  # Bottom-left
-                f.write(f"10\n{frame_max_x:.6f}\n20\n{frame_min_y:.6f}\n")  # Bottom-right
-                f.write(f"10\n{frame_max_x:.6f}\n20\n{frame_max_y:.6f}\n")  # Top-right
-                f.write(f"10\n{frame_min_x:.6f}\n20\n{frame_max_y:.6f}\n")  # Top-left
-            
-            # Write each polygon as a POLYLINE
-            for poly_id, poly_data in enumerate(polygons_data):
-                polygon = poly_data['polygon']
-                color = poly_data['color']
-                
-                # Get coordinates
-                coords = list(polygon.exterior.coords)
-                
-                # Map color to AutoCAD color index (simplified)
-                color_index = self.get_autocad_color_index(color)
-                
-                # Start POLYLINE entity
-                f.write("0\nLWPOLYLINE\n")
-                f.write("8\n0\n")  # Layer
-                f.write(f"62\n{color_index}\n")  # Color
-                f.write(f"90\n{len(coords)-1}\n")  # Number of vertices (exclude duplicate last point)
-                f.write("70\n1\n")  # Closed polyline
-                
-                # Write vertices (skip the last duplicate point)
-                for x, y in coords[:-1]:
-                    f.write(f"10\n{float(x):.6f}\n")  # X coordinate
-                    f.write(f"20\n{float(y):.6f}\n")  # Y coordinate
-            
-            # End entities section
-            f.write("0\nENDSEC\n")
-            
-            # End of file
-            f.write("0\nEOF\n")
-    
     def get_autocad_color_index(self, qcolor):
-        """Convert QColor to nearest AutoCAD color index (1-255)"""
-        # Simple color mapping to common AutoCAD colors
-        r, g, b = qcolor.red(), qcolor.green(), qcolor.blue()
+        """Convert QColor to AutoCAD Color Index (ACI).
+        Returns the closest ACI color index for the given QColor."""
+        # Get RGB values from QColor
+        rgb_color = (qcolor.red(), qcolor.green(), qcolor.blue())
         
-        # Basic color mapping
-        if r > 200 and g < 100 and b < 100:
-            return 1  # Red
-        elif r < 100 and g > 200 and b < 100:
-            return 3  # Green
-        elif r < 100 and g < 100 and b > 200:
-            return 5  # Blue
-        elif r > 200 and g > 200 and b < 100:
-            return 2  # Yellow
-        elif r > 200 and g < 100 and b > 200:
-            return 6  # Magenta
-        elif r < 100 and g > 200 and b > 200:
-            return 4  # Cyan
-        elif r < 100 and g < 100 and b < 100:
-            return 8  # Dark gray
-        elif r > 200 and g > 200 and b > 200:
-            return 7  # White
-        else:
-            return 9  # Light gray (default)
+        # Standard AutoCAD ACI colors (simplified mapping)
+        aci_colors = {
+            (255, 0, 0): 1,    # Red
+            (255, 255, 0): 2,  # Yellow
+            (0, 255, 0): 3,    # Green
+            (0, 255, 255): 4,  # Cyan
+            (0, 0, 255): 5,    # Blue
+            (255, 0, 255): 6,  # Magenta
+            (255, 255, 255): 7, # White/Black
+            (128, 128, 128): 8, # Gray
+            (192, 192, 192): 9  # Light gray
+        }
+        
+        # Find closest color
+        min_distance = float('inf')
+        closest_aci = 7  # Default to white/black
+        
+        for aci_rgb, aci_index in aci_colors.items():
+            distance = sum((a - b) ** 2 for a, b in zip(rgb_color, aci_rgb)) ** 0.5
+            if distance < min_distance:
+                min_distance = distance
+                closest_aci = aci_index
+        
+        return closest_aci
     
     def on_color_selected(self, color):
         """Handle color selection from the palette"""
@@ -3284,140 +2677,6 @@ class MosaicEditor(QMainWindow):
         except Exception as e:
             # Silently handle any errors to prevent crashes
             print(f"Warning: Error in exit_all_modes: {e}")
-
-    def on_save_plates_clicked(self):
-        """Handle Save Plates button click - save detected blob contours as DXF files with frames"""
-        canvas = self.canvas_container.canvas
-        
-        # Check if blob detection has been performed
-        if not hasattr(canvas, 'all_contours') or not canvas.all_contours:
-            QMessageBox.information(self, "Info", "No blob contours detected. Please run 'Cut Plates' first.")
-            return
-        
-        # Let user choose the output folder
-        folder_path = QFileDialog.getExistingDirectory(
-            self, 
-            "Choose Folder to Save DXF Plate Files",
-            "",
-            QFileDialog.ShowDirsOnly | QFileDialog.DontResolveSymlinks
-        )
-        
-        if not folder_path:
-            return  # User cancelled
-        
-        try:
-            # Grid labels for file naming (A1-F6)
-            rows = ['A', 'B', 'C', 'D', 'E', 'F']
-            cols = ['1', '2', '3', '4', '5', '6']
-            
-            # Get grid parameters for frame calculation
-            cell_size_world = canvas.grid_size
-            grid_x_world = canvas.grid_offset_x
-            grid_y_world = canvas.grid_offset_y
-            margin = 13  # 15 pixel margin for frame
-            
-            files_saved = 0
-            
-            for box_index, contours in canvas.all_contours.items():
-                if not contours:
-                    continue  # Skip boxes with no contours
-                
-                # Calculate grid box name
-                row = box_index // 6  # 0-5
-                col = box_index % 6   # 0-5
-                box_label = f"{rows[row]}{cols[col]}"
-                
-                # Calculate box boundaries in world coordinates for frame
-                box_left = grid_x_world + (col * cell_size_world)
-                box_top = grid_y_world + (row * cell_size_world)
-                box_right = box_left + cell_size_world
-                box_bottom = box_top + cell_size_world
-                
-                # Use same fixed 20-pixel margin as Save Boxes for consistency
-                world_margin = 20  # Fixed 20 pixel margin in world coordinates
-                
-                # Create frame coordinates with margin
-                frame_left = box_left - world_margin
-                frame_top = box_top - world_margin
-                frame_right = box_right + world_margin
-                frame_bottom = box_bottom + world_margin
-                
-                # Create DXF file path
-                dxf_filename = f"{box_label}.dxf"
-                dxf_filepath = f"{folder_path}/{dxf_filename}"
-                
-                # Save contours and frame to DXF
-                try:
-                    self.save_contours_and_frame_to_dxf(contours, frame_left, frame_top, frame_right, frame_bottom, dxf_filepath, box_label)
-                    files_saved += 1
-                    print(f"Saved {dxf_filename}")
-                except Exception as e:
-                    print(f"Error saving {dxf_filename}: {e}")
-                    QMessageBox.warning(self, "Error", f"Failed to save {dxf_filename}: {str(e)}")
-            
-            # Show completion message
-            QMessageBox.information(self, "Export Complete", f"Saved {files_saved} DXF plate files to:\n{folder_path}")
-            
-        except Exception as e:
-            QMessageBox.critical(self, "Error", f"An error occurred while saving plates: {str(e)}")
-
-    def save_contours_and_frame_to_dxf(self, contours, frame_left, frame_top, frame_right, frame_bottom, dxf_path, box_label):
-        """Save contours and 3 circles arranged in pyramid pattern to a DXF file (no frame)"""
-        try:
-            import ezdxf
-            
-            # Create new DXF document
-            doc = ezdxf.new('R2010')
-            msp = doc.modelspace()
-            
-            # Calculate grid box boundaries (use the provided coordinates directly)
-            box_left = frame_left
-            box_top = frame_top
-            box_right = frame_right
-            box_bottom = frame_bottom
-            
-            box_width = box_right - box_left
-            box_height = box_bottom - box_top
-            
-            # Add 3 circles arranged in pyramid pattern (diameter = 10 pixels, radius = 5)
-            circle_radius = 5.0  # 10 pixel diameter = 5 pixel radius
-            
-            # Calculate positions for pyramid arrangement
-            # Top third: 1 circle centered horizontally
-            top_circle_x = box_left + (box_width / 2)
-            top_circle_y = box_top + (box_height / 3)
-            
-            # Bottom third: 2 circles, spaced apart horizontally  
-            bottom_y = box_top + (2 * box_height / 3)
-            bottom_left_x = box_left + (box_width / 3)
-            bottom_right_x = box_left + (2 * box_width / 3)
-            
-            # Add circles on CIRCLES layer
-            msp.add_circle((float(top_circle_x), float(top_circle_y)), circle_radius).dxf.layer = "CIRCLES"
-            msp.add_circle((float(bottom_left_x), float(bottom_y)), circle_radius).dxf.layer = "CIRCLES"
-            msp.add_circle((float(bottom_right_x), float(bottom_y)), circle_radius).dxf.layer = "CIRCLES"
-            
-            # Add each contour
-            for i, contour in enumerate(contours):
-                points = []
-                for point in contour:
-                    x, y = point
-                    points.append((float(x), float(y)))
-                
-                # Close the contour by adding the first point at the end
-                if len(points) > 2:
-                    points.append(points[0])
-                    
-                    # Create contour polyline
-                    contour_polyline = msp.add_lwpolyline(points)
-                    contour_polyline.closed = True
-                    contour_polyline.dxf.layer = f"CONTOUR_{i+1}"
-            
-            # Save DXF file
-            doc.saveas(dxf_path)
-            
-        except Exception as e:
-            raise Exception(f"Error creating DXF file: {e}")
 
     def detect_blob(self, image, target_color, tolerance=30):
         """Simple blob detection for any box."""
@@ -3507,6 +2766,79 @@ class MosaicEditor(QMainWindow):
         # Refresh the display
         self.canvas_container.canvas.invalidate_cache()
         self.canvas_container.canvas.update()
+
+    def on_scale_clicked(self):
+        """Handle Scale button click - scale all polygons by the specified factor"""
+        if not self.canvas_container.canvas.polygons:
+            QMessageBox.information(self, "Info", "No tiles loaded to scale.")
+            return
+        
+        # Get scale factor from input field
+        try:
+            scale_factor_percent = float(self.scale_factor_input.text())
+            if scale_factor_percent <= 0:
+                QMessageBox.warning(self, "Invalid Input", "Scale factor must be a positive number.")
+                return
+            scale_factor = scale_factor_percent / 100.0  # Convert percentage to decimal
+        except ValueError:
+            QMessageBox.warning(self, "Invalid Input", "Please enter a valid number for the scale factor.")
+            return
+        
+        # Disable button during processing
+        self.scale_btn.setText("Scaling...")
+        self.scale_btn.setEnabled(False)
+        QApplication.processEvents()
+        
+        try:
+            from shapely.affinity import scale
+            
+            scaled_polygons = []
+            total_polygons = len(self.canvas_container.canvas.polygons)
+            
+            # Scale each polygon by the specified factor around its centroid
+            for i, polygon in enumerate(self.canvas_container.canvas.polygons):
+                try:
+                    if polygon.is_valid and not polygon.is_empty:
+                        # Scale the polygon by the specified factor around its centroid
+                        scaled_polygon = scale(polygon, xfact=scale_factor, yfact=scale_factor, origin='centroid')
+                        scaled_polygons.append(scaled_polygon)
+                    else:
+                        # Keep invalid polygons as they are
+                        scaled_polygons.append(polygon)
+                except Exception as e:
+                    print(f"Error scaling polygon {i}: {e}")
+                    # Keep original polygon on error
+                    scaled_polygons.append(polygon)
+            
+            # Update the canvas with scaled polygons
+            self.canvas_container.canvas.polygons = scaled_polygons
+            
+            # Update the display
+            self.canvas_container.canvas.invalidate_cache()
+            self.canvas_container.canvas.update()
+            
+            QMessageBox.information(
+                self, 
+                "Scale Complete", 
+                f"Successfully scaled {total_polygons} polygons to {scale_factor_percent}% of their original size."
+            )
+            
+        except ImportError:
+            QMessageBox.warning(
+                self, 
+                "Import Error", 
+                "Shapely library is required for scaling operations."
+            )
+        except Exception as e:
+            QMessageBox.warning(
+                self, 
+                "Scale Error", 
+                f"An error occurred while scaling polygons: {str(e)}"
+            )
+        finally:
+            # Re-enable button
+            self.scale_btn.setText("Scale")
+            self.scale_btn.setEnabled(True)
 
     def find_overlapping_polygons(self):
         """
