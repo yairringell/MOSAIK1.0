@@ -2815,9 +2815,6 @@ class MosaicEditor(QMainWindow):
         # Set flag to indicate Cut Tiles has been applied (for grid box fill colors)
         self.canvas_container.canvas.cut_tiles_applied = True
         
-        # Save DXF files for grid box perimeters
-        self.save_box_tiles()
-        
         # Re-enable Cut Plates button after operation is complete
         self.cut_tiles_btn.setEnabled(True)
         self.cut_tiles_btn.setText("Cut Plates")
@@ -2849,19 +2846,6 @@ class MosaicEditor(QMainWindow):
             self.save_boxes_btn.setEnabled(True)
             self.save_boxes_btn.setText("Save Boxes")
             return  # User cancelled
-        
-        # Ask user if they want to apply filet to polygons
-        from PyQt5.QtWidgets import QMessageBox
-        reply = QMessageBox.question(
-            self,
-            "Apply Filet",
-            "Do you want to apply filet (radius 0.5) to all polygon corners in the DXF files?\n\n"
-            "This will create rounded corners on the tiles.",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No  # Default to No
-        )
-        
-        apply_filet = (reply == QMessageBox.Yes)
         
         # Get grid parameters
         cell_size_world = self.canvas_container.canvas.grid_size
@@ -2970,7 +2954,7 @@ class MosaicEditor(QMainWindow):
             # Save DXF files - main box file and separate files for each color
             try:
                 # Save main DXF file with all polygons
-                self.save_polygons_to_dxf(polygons_data, dxf_filepath, box_name, box_index, apply_filet)
+                self.save_polygons_to_dxf(polygons_data, dxf_filepath, box_name, box_index)
                 dxf_files_saved += 1
                 
                 # Group polygons by original color (for manufacturing accuracy)
@@ -2993,7 +2977,7 @@ class MosaicEditor(QMainWindow):
                     color_dxf_filepath = f"{box_folder_path}/{color_dxf_filename}"
                     
                     try:
-                        self.save_polygons_to_dxf(color_polygons, color_dxf_filepath, f"{box_name} - {color_hex}", box_index, apply_filet)
+                        self.save_polygons_to_dxf(color_polygons, color_dxf_filepath, f"{box_name} - {color_hex}", box_index)
                         dxf_files_saved += 1
                     except Exception as e:
                         QMessageBox.warning(self, "Error", f"Failed to save color DXF {color_dxf_filename}: {str(e)}")
@@ -3090,7 +3074,7 @@ class MosaicEditor(QMainWindow):
         # Force UI update to show the re-enabled state
         QApplication.processEvents()
 
-    def save_polygons_to_dxf(self, polygons_data, dxf_filepath, box_name, box_index=None, apply_filet=False):
+    def save_polygons_to_dxf(self, polygons_data, dxf_filepath, box_name, box_index=None):
         """Save polygons to DXF file format with frame based on grid box dimensions"""
         # Create a simple DXF file manually (without external dependencies)
         with open(dxf_filepath, 'w', encoding='utf-8') as f:
@@ -3182,41 +3166,7 @@ class MosaicEditor(QMainWindow):
                 polygon = poly_data['polygon']
                 color = poly_data['color']
                 
-                # Apply filet if requested
-                if apply_filet:
-                    try:
-                        # Apply internal filet with radius 0.5
-                        filet_radius = 0.5
-                        
-                        # Create internal filet that doesn't exceed original polygon boundaries
-                        shrunk_polygon = polygon.buffer(-filet_radius)
-                        
-                        if shrunk_polygon.is_valid and not shrunk_polygon.is_empty:
-                            # Expand back by same radius to create rounded corners
-                            filleted_polygon = shrunk_polygon.buffer(filet_radius)
-                            
-                            # Ensure result doesn't exceed original boundaries by intersecting
-                            final_polygon = filleted_polygon.intersection(polygon)
-                            
-                            # Handle MultiPolygon results (take the largest polygon)
-                            from shapely.geometry import MultiPolygon
-                            if isinstance(final_polygon, MultiPolygon):
-                                if len(final_polygon.geoms) > 0:
-                                    final_polygon = max(final_polygon.geoms, key=lambda p: p.area)
-                                else:
-                                    final_polygon = polygon  # Fallback to original
-                            
-                            # Use filleted polygon if valid
-                            if (final_polygon.is_valid and 
-                                not final_polygon.is_empty and 
-                                hasattr(final_polygon, 'exterior')):
-                                polygon = final_polygon
-                    
-                    except Exception as e:
-                        # If filet fails, use original polygon
-                        print(f"Warning: Could not apply filet to polygon {poly_id}: {e}")
-                
-                # Get coordinates from the (possibly filleted) polygon
+                # Get coordinates
                 coords = list(polygon.exterior.coords)
                 
                 # Map color to AutoCAD color index (simplified)
@@ -3334,152 +3284,6 @@ class MosaicEditor(QMainWindow):
         except Exception as e:
             # Silently handle any errors to prevent crashes
             print(f"Warning: Error in exit_all_modes: {e}")
-
-    def save_box_tiles(self):
-        """Detect blobs only in grid boxes that contain polygons (from Cut operation)."""
-        try:
-            canvas = self.canvas_container.canvas
-            
-            # Check if Cut Tiles has been applied
-            if not hasattr(canvas, 'cut_tiles_applied') or not canvas.cut_tiles_applied:
-                print("Cut Tiles must be applied first")
-                return
-            
-            # Check if Cut has been run to identify boxes with polygons
-            if not hasattr(canvas, 'boxes_with_polygons'):
-                print("Cut must be run first to identify boxes with polygons")
-                return
-                
-            boxes_to_process = canvas.boxes_with_polygons
-            box_labels = [f"{chr(ord('A') + (i//6))}{(i%6)+1}" for i in sorted(boxes_to_process)]
-            print(f"Detecting blobs in {len(boxes_to_process)} boxes that contain polygons: {', '.join(box_labels)}")
-            
-            # Initialize storage for all contours
-            canvas.all_contours = {}  # Dictionary mapping box_index to contours list
-            
-            # Calculate grid parameters
-            cell_size_world = canvas.grid_size
-            grid_x_world = canvas.grid_offset_x
-            grid_y_world = canvas.grid_offset_y
-            margin = 20
-            
-            # Grid labels for debugging (A1-F6)
-            rows = ['A', 'B', 'C', 'D', 'E', 'F']
-            cols = ['1', '2', '3', '4', '5', '6']
-            
-            # Process only boxes that contain polygons
-            total_contours_found = 0
-            for box_index in boxes_to_process:
-                # Calculate row and column from box index (0-35)
-                row = box_index // 6  # 0-5
-                col = box_index % 6   # 0-5
-                box_label = f"{rows[row]}{cols[col]}"
-                
-                # Calculate box boundaries in world coordinates
-                box_left = grid_x_world + (col * cell_size_world)
-                box_top = grid_y_world + (row * cell_size_world)
-                box_right = box_left + cell_size_world
-                box_bottom = box_top + cell_size_world
-                
-                # Convert to screen coordinates
-                screen_left, screen_top = canvas.world_to_screen(box_left, box_top)
-                screen_right, screen_bottom = canvas.world_to_screen(box_right, box_bottom)
-                
-                # Calculate screen rectangle with margins
-                screen_x = int(min(screen_left, screen_right)) - margin
-                screen_y = int(min(screen_top, screen_bottom)) - margin
-                screen_width = int(abs(screen_right - screen_left)) + 2 * margin
-                screen_height = int(abs(screen_bottom - screen_top)) + 2 * margin
-                
-                # Capture the box area with margins
-                box_rect = QRect(screen_x, screen_y, screen_width, screen_height)
-                box_pixmap = canvas.grab(box_rect)
-                
-                # Save debug image for first few boxes
-                if box_index < 3:  # Save A1, A2, A3 for inspection
-                    box_pixmap.save(f"debug_{box_label.lower()}_capture.png")
-                    print(f"Saved debug_{box_label.lower()}_capture.png for inspection")
-            
-                # Save debug image for first few boxes
-                if box_index < 3:  # Save A1, A2, A3 for inspection
-                    box_pixmap.save(f"debug_{box_label.lower()}_capture.png")
-                    print(f"Saved debug_{box_label.lower()}_capture.png for inspection")
-                
-                # Convert to OpenCV format for analysis
-                qimage = box_pixmap.toImage()
-                width = qimage.width()
-                height = qimage.height()
-                
-                # Check if the image is valid
-                if width == 0 or height == 0:
-                    print(f"Invalid image size for {box_label}: {width}x{height}")
-                    canvas.all_contours[box_index] = []
-                    continue
-                
-                # Convert to numpy array (RGBA format)
-                ptr = qimage.bits()
-                if ptr is None:
-                    print(f"Failed to get image data for {box_label}")
-                    canvas.all_contours[box_index] = []
-                    continue
-                    
-                ptr.setsize(height * width * 4)
-                arr = np.frombuffer(ptr, np.uint8).reshape((height, width, 4))
-                
-                # Convert RGBA to BGR for OpenCV
-                bgr_image = cv2.cvtColor(arr, cv2.COLOR_RGBA2BGR)
-                
-                # Save BGR version for first few boxes
-                if box_index < 3:
-                    cv2.imwrite(f"debug_{box_label.lower()}_bgr.png", bgr_image)
-                
-                # Sample the center color of the box (accounting for margins)
-                center_x = width // 2
-                center_y = height // 2
-                
-                if center_x < width and center_y < height:
-                    bgr_center = bgr_image[center_y, center_x]
-                    
-                    # Use the center color for detection
-                    target_color = QColor(int(bgr_center[2]), int(bgr_center[1]), int(bgr_center[0]))
-                    
-                    # Perform blob detection on the captured area
-                    contours = self.detect_blob(bgr_image, target_color, tolerance=30)
-                    
-                    if contours:
-                        print(f"Found {len(contours)} contour(s) in {box_label}")
-                        total_contours_found += len(contours)
-                        
-                        # Convert contours to world coordinates
-                        world_contours = []
-                        for contour in contours:
-                            world_contour = []
-                            for point in contour:
-                                px, py = point[0]
-                                # Convert from captured image coordinates to screen coordinates
-                                screen_px = px + screen_x + 1  # Add 1 pixel offset to the right
-                                screen_py = py + screen_y + 1  # Add 1 pixel offset down
-                                # Convert to world coordinates
-                                world_x, world_y = canvas.screen_to_world(screen_px, screen_py)
-                                world_contour.append([world_x, world_y])
-                            
-                            world_contours.append(world_contour)
-                        
-                        # Store contours for this box
-                        canvas.all_contours[box_index] = world_contours
-                    else:
-                        # No contours found for this box
-                        canvas.all_contours[box_index] = []
-                else:
-                    canvas.all_contours[box_index] = []
-            
-            print(f"Detection completed. Found total of {total_contours_found} contours across all boxes.")
-            canvas.update()  # Refresh display to show all contours
-            
-        except Exception as e:
-            print(f"Error in blob detection: {e}")
-            import traceback
-            traceback.print_exc()
 
     def on_save_plates_clicked(self):
         """Handle Save Plates button click - save detected blob contours as DXF files with frames"""
