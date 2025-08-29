@@ -27,6 +27,7 @@ class CutterCanvas(QWidget):
         self.colors = []
         self.edge_colors = []  # Store edge/frame colors separately
         self.original_colors = []  # Store original colors before Cut operation
+        self.tile_polygons = {}  # Track tile polygons by box index {box_index: polygon}
         self.boxes_with_polygons = set()  # Track which grid boxes have polygons
         self.filled_box_index = -1  # Track which box should be filled (-1 = none)
         
@@ -789,7 +790,7 @@ class ControlPanel(QWidget):
         QApplication.processEvents()
     
     def on_tiles_clicked(self):
-        """Handle Tiles button click - create a polygon matching grid box A1"""
+        """Handle Tiles button click - create polygons for all grid boxes with content"""
         if not self.canvas or not self.canvas.polygons:
             return
             
@@ -798,91 +799,140 @@ class ControlPanel(QWidget):
             QMessageBox.warning(self, "Error", "Please run Cut first to assign polygons to grid boxes.")
             return
         
+        # Disable Tiles button during processing
+        self.tiles_btn.setEnabled(False)
+        self.tiles_btn.setText("Processing...")
+        # Force UI update to show the disabled state immediately
+        QApplication.processEvents()
+        
         # Get grid parameters
         cell_size = self.canvas.grid_size
         grid_x = self.canvas.grid_offset_x
         grid_y = self.canvas.grid_offset_y
         
-        # A1 box is at position (0, 0) in the 6x6 grid (box index 0)
-        # Calculate A1 box bounds in world coordinates
-        box_x1 = grid_x
-        box_y1 = grid_y
-        box_x2 = box_x1 + cell_size
-        box_y2 = box_y1 + cell_size
-        
-        # Create a rectangular polygon for A1 box
-        a1_polygon_coords = [
-            (box_x1, box_y1),  # Top-left
-            (box_x2, box_y1),  # Top-right
-            (box_x2, box_y2),  # Bottom-right
-            (box_x1, box_y2),  # Bottom-left
-            (box_x1, box_y1)   # Close the polygon
-        ]
-        
-        # Create Shapely polygon for A1 box
-        a1_box_polygon = Polygon(a1_polygon_coords)
-        
-        # Find all polygons assigned to A1 (box index 0) by the Cut function
-        a1_polygons = []
-        non_a1_intersecting_polygons = []
-        
-        for i, polygon in enumerate(self.canvas.polygons):
-            # Get the box assignment for this polygon from Cut results
-            box_index = self.canvas.calculate_dominant_grid_box(polygon, grid_x, grid_y, cell_size)
-            
-            # Check if polygon intersects or touches the A1 box boundary
-            if polygon.intersects(a1_box_polygon) or polygon.touches(a1_box_polygon):
-                if box_index == 0:  # A1 box index
-                    # This polygon was assigned to A1 by Cut function
-                    a1_polygons.append(polygon)
-                    print(f"Polygon {i}: Assigned to A1, will unify")
-                else:
-                    # This polygon intersects A1 but was assigned to another box
-                    non_a1_intersecting_polygons.append(polygon)
-                    print(f"Polygon {i}: Assigned to box {box_index}, intersects A1, will subtract")
-        
-        # Start with the original A1 box polygon (but don't add it to canvas yet)
-        modified_a1_polygon = a1_box_polygon
-        
-        # First, unify all polygons that were marked as A1 polygons by Cut
-        for polygon_to_unify in a1_polygons:
-            try:
-                modified_a1_polygon = modified_a1_polygon.union(polygon_to_unify)
-                print(f"Unified A1-assigned polygon with A1 box")
-            except Exception as unify_e:
-                print(f"Error unifying A1 polygon: {unify_e}")
-                continue
-        
-        # Then subtract polygons that intersect A1 but are not marked as A1 polygons
-        for polygon_to_subtract in non_a1_intersecting_polygons:
-            try:
-                modified_a1_polygon = modified_a1_polygon.difference(polygon_to_subtract)
-                print(f"Subtracted non-A1 polygon from A1 box")
-            except Exception as subtract_e:
-                print(f"Error subtracting non-A1 polygon: {subtract_e}")
-                continue
-        
-        # Add the final A1 polygon to the canvas (don't fill with color initially)
+        # Initialize canvas arrays if needed
         if not hasattr(self.canvas, 'polygons'):
             self.canvas.polygons = []
             self.canvas.colors = []
             self.canvas.edge_colors = []
         
-        # Add the new polygon without fill color
-        self.canvas.polygons.append(modified_a1_polygon)
-        # Use transparent fill or no fill based on user setting
-        if hasattr(self.canvas, 'transparent_fill') and self.canvas.transparent_fill:
-            self.canvas.colors.append(QColor(0, 0, 0, 0))  # Transparent
-        else:
-            self.canvas.colors.append(QColor(255, 0, 0, 100))  # Semi-transparent red
-        self.canvas.edge_colors.append(QColor(255, 255, 0))   # Yellow outline
+        # Count for summary
+        total_boxes_processed = 0
+        total_unified = 0
+        total_subtracted = 0
+        
+        # Process each box that has polygons
+        for box_index in self.canvas.boxes_with_polygons:
+            # Convert 1D box index to 2D coordinates (row, col)
+            row = box_index // 6
+            col = box_index % 6
+            
+            # Calculate box bounds in world coordinates
+            box_x1 = grid_x + col * cell_size
+            box_y1 = grid_y + row * cell_size
+            box_x2 = box_x1 + cell_size
+            box_y2 = box_y1 + cell_size
+            
+            # Create a rectangular polygon for this box
+            box_polygon_coords = [
+                (box_x1, box_y1),  # Top-left
+                (box_x2, box_y1),  # Top-right
+                (box_x2, box_y2),  # Bottom-right
+                (box_x1, box_y2),  # Bottom-left
+                (box_x1, box_y1)   # Close the polygon
+            ]
+            
+            # Create Shapely polygon for this box
+            box_polygon = Polygon(box_polygon_coords)
+            
+            # Find polygons for this specific box
+            box_assigned_polygons = []
+            intersecting_other_polygons = []
+            
+            for i, polygon in enumerate(self.canvas.polygons):
+                # Get the box assignment for this polygon from Cut results
+                polygon_box_index = self.canvas.calculate_dominant_grid_box(polygon, grid_x, grid_y, cell_size)
+                
+                # Check if polygon intersects or touches this box boundary
+                if polygon.intersects(box_polygon) or polygon.touches(box_polygon):
+                    if polygon_box_index == box_index:
+                        # This polygon was assigned to this box by Cut function
+                        box_assigned_polygons.append(polygon)
+                    else:
+                        # This polygon intersects this box but was assigned to another box
+                        intersecting_other_polygons.append(polygon)
+            
+            # Start with the original box polygon
+            modified_box_polygon = box_polygon
+            
+            # First, unify all polygons that were assigned to this box by Cut
+            for polygon_to_unify in box_assigned_polygons:
+                try:
+                    modified_box_polygon = modified_box_polygon.union(polygon_to_unify)
+                    total_unified += 1
+                except Exception as unify_e:
+                    print(f"Error unifying polygon in box {box_index}: {unify_e}")
+                    continue
+            
+            # Then subtract polygons that intersect this box but are assigned to other boxes
+            for polygon_to_subtract in intersecting_other_polygons:
+                try:
+                    modified_box_polygon = modified_box_polygon.difference(polygon_to_subtract)
+                    total_subtracted += 1
+                except Exception as subtract_e:
+                    print(f"Error subtracting polygon from box {box_index}: {subtract_e}")
+                    continue
+            
+            # Add the final box polygon to the canvas
+            self.canvas.polygons.append(modified_box_polygon)
+            
+            # Track this as a tile polygon
+            if not hasattr(self.canvas, 'tile_polygons'):
+                self.canvas.tile_polygons = {}
+            self.canvas.tile_polygons[box_index] = modified_box_polygon
+            
+            # Use transparent fill or no fill based on user setting
+            if hasattr(self.canvas, 'transparent_fill') and self.canvas.transparent_fill:
+                self.canvas.colors.append(QColor(0, 0, 0, 0))  # Transparent
+            else:
+                # Use different colors for different boxes (cycling through colors)
+                colors = [
+                    QColor(255, 0, 0, 100),    # Red
+                    QColor(0, 255, 0, 100),    # Green
+                    QColor(0, 0, 255, 100),    # Blue
+                    QColor(255, 255, 0, 100),  # Yellow
+                    QColor(255, 0, 255, 100),  # Magenta
+                    QColor(0, 255, 255, 100),  # Cyan
+                ]
+                color_index = box_index % len(colors)
+                self.canvas.colors.append(colors[color_index])
+            
+            # All tiles get yellow outline
+            self.canvas.edge_colors.append(QColor(255, 255, 0))   # Yellow outline
+            
+            total_boxes_processed += 1
+            
+            # Convert box index to letter+number format for logging
+            box_letter = chr(ord('A') + row)
+            box_number = col + 1
+            print(f"Created tile polygon for box {box_letter}{box_number} (index {box_index})")
+            print(f"  - Unified {len(box_assigned_polygons)} assigned polygons")
+            print(f"  - Subtracted {len(intersecting_other_polygons)} intersecting polygons")
         
         # Update the display
         self.canvas.update()
         
-        print(f"Created A1 tile polygon at ({box_x1}, {box_y1}) to ({box_x2}, {box_y2})")
-        print(f"Unified {len(a1_polygons)} A1-assigned polygons")
-        print(f"Subtracted {len(non_a1_intersecting_polygons)} non-A1 intersecting polygons")
+        # Summary
+        print(f"\n=== Tiles Creation Summary ===")
+        print(f"Processed {total_boxes_processed} boxes with polygons")
+        print(f"Total polygons unified: {total_unified}")
+        print(f"Total polygons subtracted: {total_subtracted}")
+        
+        # Re-enable Tiles button after operation is complete
+        self.tiles_btn.setEnabled(True)
+        self.tiles_btn.setText("Tiles")
+        # Force UI update to show the re-enabled state
+        QApplication.processEvents()
     
     def on_save_boxes_clicked(self):
         """Handle Save Boxes button click - save polygons organized by grid boxes"""
@@ -938,8 +988,16 @@ class ControlPanel(QWidget):
                         'box_index': box_index
                     }
             
-            # Assign polygons to boxes
+            # Assign polygons to boxes (excluding tile polygons)
+            tile_polygons_set = set()
+            if hasattr(self.canvas, 'tile_polygons'):
+                tile_polygons_set = set(self.canvas.tile_polygons.values())
+            
             for i, polygon in enumerate(self.canvas.polygons):
+                # Skip tile polygons - they will be saved separately
+                if polygon in tile_polygons_set:
+                    continue
+                    
                 box_index = self.canvas.calculate_dominant_grid_box(polygon, grid_x, grid_y, cell_size)
                 if 0 <= box_index < 36:
                     box_label = box_labels[box_index]
@@ -1010,6 +1068,26 @@ class ControlPanel(QWidget):
                             dxf_files_saved += 1
                         except Exception as e:
                             print(f"Failed to save color DXF {color_dxf_filename}: {str(e)}")
+                    
+                    # Save tile polygon DXF if it exists for this box
+                    if hasattr(self.canvas, 'tile_polygons') and data['box_index'] in self.canvas.tile_polygons:
+                        tile_polygon = self.canvas.tile_polygons[data['box_index']]
+                        tile_dxf_filename = os.path.join(box_dir, f"{box_label}_tile.dxf")
+                        
+                        # Create polygon data for the tile polygon
+                        tile_polygon_data = [{
+                            'polygon': tile_polygon,
+                            'color': QColor(255, 255, 0),  # Yellow color for tile polygon
+                            'original_color': QColor(255, 255, 0),
+                            'original_index': 0
+                        }]
+                        
+                        try:
+                            self.save_polygons_to_dxf(tile_polygon_data, tile_dxf_filename, f"{box_label} Tile", data['box_index'])
+                            dxf_files_saved += 1
+                            print(f"Saved tile polygon DXF: {tile_dxf_filename}")
+                        except Exception as e:
+                            print(f"Failed to save tile DXF {tile_dxf_filename}: {str(e)}")
             
             # Create general CSV file with all polygons and area calculations
             self.save_general_csv(box_tiles_dir, boxes_data)
@@ -1180,25 +1258,42 @@ class ControlPanel(QWidget):
             fieldnames = ['coordinates', 'color_r', 'color_g', 'color_b', 'color_a']
             writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
             writer.writeheader()
-            
+
             for polygon, color in zip(polygons, colors):
-                # Convert polygon coordinates to list format
-                coords = list(polygon.exterior.coords[:-1])  # Remove duplicate last point
-                coord_str = str(coords)
+                # Handle both Polygon and MultiPolygon types
+                polygons_to_save = []
+                if hasattr(polygon, 'exterior'):
+                    # Single Polygon
+                    polygons_to_save.append(polygon)
+                elif hasattr(polygon, 'geoms'):
+                    # MultiPolygon - save each polygon separately
+                    polygons_to_save.extend(polygon.geoms)
+                else:
+                    print(f"Warning: Unknown polygon type {type(polygon)}, skipping")
+                    continue
                 
-                # Normalize color values to 0-1 range
-                r = color.red() / 255.0
-                g = color.green() / 255.0
-                b = color.blue() / 255.0
-                a = color.alpha() / 255.0
-                
-                writer.writerow({
-                    'coordinates': coord_str,
-                    'color_r': r,
-                    'color_g': g,
-                    'color_b': b,
-                    'color_a': a
-                })
+                # Save each polygon (single or part of MultiPolygon)
+                for sub_poly in polygons_to_save:
+                    if not hasattr(sub_poly, 'exterior'):
+                        continue  # Skip invalid geometries
+                        
+                    # Convert polygon coordinates to list format
+                    coords = list(sub_poly.exterior.coords[:-1])  # Remove duplicate last point
+                    coord_str = str(coords)
+                    
+                    # Normalize color values to 0-1 range
+                    r = color.red() / 255.0
+                    g = color.green() / 255.0
+                    b = color.blue() / 255.0
+                    a = color.alpha() / 255.0
+                    
+                    writer.writerow({
+                        'coordinates': coord_str,
+                        'color_r': r,
+                        'color_g': g,
+                        'color_b': b,
+                        'color_a': a
+                    })
     
     def save_polygons_to_dxf(self, polygons_data, dxf_filepath, box_name, box_index=None):
         """Save polygons to DXF file format with frame based on grid box dimensions"""
@@ -1292,22 +1387,39 @@ class ControlPanel(QWidget):
                 polygon = poly_data['polygon']
                 color = poly_data['color']
                 
-                # Get coordinates
-                coords = list(polygon.exterior.coords)
+                # Handle both Polygon and MultiPolygon types
+                polygons_to_process = []
+                if hasattr(polygon, 'exterior'):
+                    # Single Polygon
+                    polygons_to_process.append(polygon)
+                elif hasattr(polygon, 'geoms'):
+                    # MultiPolygon - process each polygon separately
+                    polygons_to_process.extend(polygon.geoms)
+                else:
+                    print(f"Warning: Unknown polygon type {type(polygon)}, skipping")
+                    continue
                 
                 # Map color to AutoCAD color index (simplified)
                 color_index = self.get_autocad_color_index(color)
                 
-                # Start POLYLINE entity
-                f.write("0\nLWPOLYLINE\n")
-                f.write("8\n0\n")  # Layer
-                f.write(f"62\n{color_index}\n")  # Color
-                f.write(f"90\n{len(coords)}\n")  # Number of vertices
-                f.write("70\n1\n")  # Closed polyline
-                
-                # Write vertices
-                for x, y in coords:
-                    f.write(f"10\n{x:.6f}\n20\n{y:.6f}\n")
+                # Process each polygon (single polygon or each part of MultiPolygon)
+                for sub_poly in polygons_to_process:
+                    if not hasattr(sub_poly, 'exterior'):
+                        continue  # Skip invalid geometries
+                        
+                    # Get coordinates
+                    coords = list(sub_poly.exterior.coords)
+                    
+                    # Start POLYLINE entity for this sub-polygon
+                    f.write("0\nLWPOLYLINE\n")
+                    f.write("8\n0\n")  # Layer
+                    f.write(f"62\n{color_index}\n")  # Color
+                    f.write(f"90\n{len(coords)}\n")  # Number of vertices
+                    f.write("70\n1\n")  # Closed polyline
+                    
+                    # Write vertices
+                    for x, y in coords:
+                        f.write(f"10\n{x:.6f}\n20\n{y:.6f}\n")
             
             # End entities section
             f.write("0\nENDSEC\n")
