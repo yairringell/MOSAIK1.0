@@ -1059,6 +1059,10 @@ class ControlPanel(QWidget):
                     if box_label in boxes_data:
                         boxes_data[box_label]['polygons'].append(polygon)
                         boxes_data[box_label]['colors'].append(self.canvas.colors[i])
+                        # Store the original polygon index to retrieve original color later
+                        if 'original_indices' not in boxes_data[box_label]:
+                            boxes_data[box_label]['original_indices'] = []
+                        boxes_data[box_label]['original_indices'].append(i)
             
             # Save each box as a separate CSV file
             saved_files = []
@@ -1087,14 +1091,12 @@ class ControlPanel(QWidget):
                     for i, (polygon, color) in enumerate(zip(processed_polygons, data['colors'])):
                         # Use original color for DXF files (before Cut operation)
                         original_color = color  # Default to current color
-                        if hasattr(self.canvas, 'original_colors') and len(self.canvas.original_colors) > 0:
-                            # Find the original index of this polygon in the full list
-                            try:
-                                original_index = self.canvas.polygons.index(polygon)
-                                if original_index < len(self.canvas.original_colors):
-                                    original_color = self.canvas.original_colors[original_index]
-                            except (ValueError, IndexError):
-                                pass  # Use current color as fallback
+                        if ('original_indices' in data and i < len(data['original_indices']) and 
+                            hasattr(self.canvas, 'original_colors') and len(self.canvas.original_colors) > 0):
+                            # Use the stored original index to get the correct original color
+                            original_index = data['original_indices'][i]
+                            if original_index < len(self.canvas.original_colors):
+                                original_color = self.canvas.original_colors[original_index]
                         
                         polygons_data.append({
                             'polygon': polygon,
@@ -1377,27 +1379,16 @@ class ControlPanel(QWidget):
                     })
     
     def save_polygons_to_dxf(self, polygons_data, dxf_filepath, box_name, box_index=None):
-        """Save polygons to DXF file format with frame based on grid box dimensions"""
-        # Create a simple DXF file manually (without external dependencies)
-        with open(dxf_filepath, 'w', encoding='utf-8') as f:
-            # DXF header
-            f.write("0\nSECTION\n2\nHEADER\n9\n$ACADVER\n1\nAC1015\n0\nENDSEC\n")
+        """Save polygons to DXF file format using ezdxf library"""
+        try:
+            import ezdxf
             
-            # Tables section
-            f.write("0\nSECTION\n2\nTABLES\n")
-            
-            # Layer table
-            f.write("0\nTABLE\n2\nLAYER\n70\n1\n")
-            f.write("0\nLAYER\n2\n0\n70\n0\n6\nCONTINUOUS\n62\n7\n")
-            f.write("0\nENDTAB\n")
-            
-            f.write("0\nENDSEC\n")
-            
-            # Entities section
-            f.write("0\nSECTION\n2\nENTITIES\n")
+            # Create a new DXF document
+            doc = ezdxf.new('R2010')  # Use AutoCAD 2010 format for good compatibility
+            msp = doc.modelspace()
             
             # Add title text
-            f.write(f"0\nTEXT\n8\n0\n10\n0.0\n20\n0.0\n30\n0.0\n40\n10.0\n1\nGrid Box {box_name}\n")
+            msp.add_text(f"Grid Box {box_name}", dxfattribs={'height': 10, 'insert': (0, 0)})
             
             # Calculate frame based on grid box dimensions + 20 pixel margin
             if box_index is not None:
@@ -1446,27 +1437,36 @@ class ControlPanel(QWidget):
                 frame_max_x = max_x + frame_margin
                 frame_max_y = max_y + frame_margin
             else:
-                # No frame if no data
-                frame_min_x = frame_min_y = frame_max_x = frame_max_y = 0
+                frame_min_x = frame_min_y = frame_max_x = frame_max_y = None
             
-            # Draw frame as a rectangle (LWPOLYLINE) if we have valid frame dimensions
-            if (box_index is not None) or polygons_data:
-                f.write("0\nLWPOLYLINE\n")
-                f.write("8\n0\n")  # Layer
-                f.write("62\n8\n")  # Color (dark gray for frame)
-                f.write("90\n4\n")  # 4 vertices for rectangle
-                f.write("70\n1\n")  # Closed polyline
-                
-                # Write frame vertices (clockwise from bottom-left)
-                f.write(f"10\n{frame_min_x:.6f}\n20\n{frame_min_y:.6f}\n")  # Bottom-left
-                f.write(f"10\n{frame_max_x:.6f}\n20\n{frame_min_y:.6f}\n")  # Bottom-right
-                f.write(f"10\n{frame_max_x:.6f}\n20\n{frame_max_y:.6f}\n")  # Top-right
-                f.write(f"10\n{frame_min_x:.6f}\n20\n{frame_max_y:.6f}\n")  # Top-left
+            # Draw frame as a rectangle if we have valid frame dimensions
+            if frame_min_x is not None:
+                frame_points = [
+                    (frame_min_x, frame_min_y),
+                    (frame_max_x, frame_min_y),
+                    (frame_max_x, frame_max_y),
+                    (frame_min_x, frame_max_y),
+                    (frame_min_x, frame_min_y)  # Close the rectangle
+                ]
+                msp.add_lwpolyline(frame_points, dxfattribs={'color': 8})  # Dark gray frame
             
-            # Write each polygon as a POLYLINE
+            # Add each polygon to the DXF
             for poly_id, poly_data in enumerate(polygons_data):
                 polygon = poly_data['polygon']
                 color = poly_data['color']
+                
+                # Use original color for DXF files (before Cut operation)
+                original_color = color  # Default to current color
+                if 'original_color' in poly_data:
+                    original_color = poly_data['original_color']
+                elif hasattr(self.canvas, 'original_colors') and len(self.canvas.original_colors) > 0:
+                    # Find the original index of this polygon in the full list
+                    try:
+                        original_index = self.canvas.polygons.index(polygon)
+                        if original_index < len(self.canvas.original_colors):
+                            original_color = self.canvas.original_colors[original_index]
+                    except (ValueError, IndexError):
+                        pass  # Use current color as fallback
                 
                 # Handle both Polygon and MultiPolygon types
                 polygons_to_process = []
@@ -1480,33 +1480,174 @@ class ControlPanel(QWidget):
                     print(f"Warning: Unknown polygon type {type(polygon)}, skipping")
                     continue
                 
-                # Map color to AutoCAD color index (simplified)
-                color_index = self.get_autocad_color_index(color)
+                # Map ORIGINAL color to AutoCAD color index (not the Cut color)
+                color_index = self.get_autocad_color_index(original_color)
                 
                 # Process each polygon (single polygon or each part of MultiPolygon)
                 for sub_poly in polygons_to_process:
                     if not hasattr(sub_poly, 'exterior'):
                         continue  # Skip invalid geometries
                         
-                    # Get coordinates
+                    # Get coordinates and convert to the format ezdxf expects
                     coords = list(sub_poly.exterior.coords)
-                    
-                    # Start POLYLINE entity for this sub-polygon
-                    f.write("0\nLWPOLYLINE\n")
-                    f.write("8\n0\n")  # Layer
-                    f.write(f"62\n{color_index}\n")  # Color
-                    f.write(f"90\n{len(coords)}\n")  # Number of vertices
-                    f.write("70\n1\n")  # Closed polyline
-                    
-                    # Write vertices
-                    for x, y in coords:
-                        f.write(f"10\n{x:.6f}\n20\n{y:.6f}\n")
+                    if len(coords) > 0:
+                        # Remove duplicate closing point if it exists
+                        if len(coords) > 1 and coords[0] == coords[-1]:
+                            coords = coords[:-1]
+                        
+                        # Add the polygon as an LWPOLYLINE using ORIGINAL color
+                        msp.add_lwpolyline(coords, close=True, dxfattribs={'color': color_index})
             
-            # End entities section
+            # Save the DXF file
+            doc.saveas(dxf_filepath)
+            print(f"Successfully saved DXF file: {dxf_filepath}")
+            
+        except ImportError:
+            print("Warning: ezdxf library not available, falling back to manual DXF creation")
+            self.save_polygons_to_dxf_manual(polygons_data, dxf_filepath, box_name, box_index)
+        except Exception as e:
+            print(f"Error saving DXF file {dxf_filepath}: {e}")
+            # Try fallback method
+            try:
+                self.save_polygons_to_dxf_manual(polygons_data, dxf_filepath, box_name, box_index)
+            except Exception as e2:
+                print(f"Fallback DXF creation also failed: {e2}")
+    
+    def save_polygons_to_dxf_manual(self, polygons_data, dxf_filepath, box_name, box_index=None):
+        """Fallback manual DXF creation with proper structure"""
+        with open(dxf_filepath, 'w', encoding='utf-8') as f:
+            # Write proper DXF header with required sections
+            f.write("0\nSECTION\n2\nHEADER\n")
+            f.write("9\n$ACADVER\n1\nAC1015\n")  # AutoCAD 2000 format
+            f.write("9\n$HANDSEED\n5\n20000\n")  # Handle seed
             f.write("0\nENDSEC\n")
             
-            # End of file
+            # Tables section with proper structure
+            f.write("0\nSECTION\n2\nTABLES\n")
+            f.write("0\nTABLE\n2\nLAYER\n5\n2\n330\n0\n100\nAcDbSymbolTable\n70\n1\n")
+            f.write("0\nLAYER\n5\n10\n330\n2\n100\nAcDbSymbolTableRecord\n")
+            f.write("100\nAcDbLayerTableRecord\n2\n0\n70\n0\n62\n7\n6\nCONTINUOUS\n")
+            f.write("0\nENDTAB\n")
+            f.write("0\nENDSEC\n")
+            
+            # Objects section (required for modern DXF)
+            f.write("0\nSECTION\n2\nOBJECTS\n")
+            f.write("0\nDICTIONARY\n5\nC\n330\n0\n100\nAcDbDictionary\n")
+            f.write("0\nENDSEC\n")
+            
+            # Entities section
+            f.write("0\nSECTION\n2\nENTITIES\n")
+            
+            handle_counter = 100  # Start handle counter
+            
+            # Add title text with proper structure
+            f.write(f"0\nTEXT\n5\n{handle_counter:X}\n330\n1F\n100\nAcDbEntity\n")
+            f.write(f"8\n0\n100\nAcDbText\n10\n0.0\n20\n0.0\n30\n0.0\n")
+            f.write(f"40\n10.0\n1\nGrid Box {box_name}\n")
+            handle_counter += 1
+            
+            # Calculate and add frame
+            frame_points = self.calculate_frame_coordinates(box_index, polygons_data)
+            if frame_points:
+                f.write(f"0\nLWPOLYLINE\n5\n{handle_counter:X}\n330\n1F\n")
+                f.write("100\nAcDbEntity\n8\n0\n62\n8\n")
+                f.write("100\nAcDbPolyline\n90\n4\n70\n1\n")
+                
+                for x, y in frame_points[:4]:  # Only first 4 points for rectangle
+                    f.write(f"10\n{x:.6f}\n20\n{y:.6f}\n")
+                handle_counter += 1
+            
+            # Add polygons with proper LWPOLYLINE structure
+            for poly_data in polygons_data:
+                polygon = poly_data['polygon']
+                color = poly_data['color']
+                
+                # Use original color for DXF files (before Cut operation)
+                original_color = color  # Default to current color
+                if 'original_color' in poly_data:
+                    original_color = poly_data['original_color']
+                elif hasattr(self.canvas, 'original_colors') and len(self.canvas.original_colors) > 0:
+                    # Find the original index of this polygon in the full list
+                    try:
+                        original_index = self.canvas.polygons.index(polygon)
+                        if original_index < len(self.canvas.original_colors):
+                            original_color = self.canvas.original_colors[original_index]
+                    except (ValueError, IndexError):
+                        pass  # Use current color as fallback
+                
+                color_index = self.get_autocad_color_index(original_color)
+                
+                polygons_to_process = []
+                if hasattr(polygon, 'exterior'):
+                    polygons_to_process.append(polygon)
+                elif hasattr(polygon, 'geoms'):
+                    polygons_to_process.extend(polygon.geoms)
+                
+                for sub_poly in polygons_to_process:
+                    if not hasattr(sub_poly, 'exterior'):
+                        continue
+                        
+                    coords = list(sub_poly.exterior.coords)
+                    if len(coords) > 1 and coords[0] == coords[-1]:
+                        coords = coords[:-1]  # Remove duplicate closing point
+                    
+                    if len(coords) >= 3:  # Need at least 3 points for a polygon
+                        f.write(f"0\nLWPOLYLINE\n5\n{handle_counter:X}\n330\n1F\n")
+                        f.write("100\nAcDbEntity\n8\n0\n")
+                        f.write(f"62\n{color_index}\n")
+                        f.write("100\nAcDbPolyline\n")
+                        f.write(f"90\n{len(coords)}\n70\n1\n")
+                        
+                        for x, y in coords:
+                            f.write(f"10\n{x:.6f}\n20\n{y:.6f}\n")
+                        handle_counter += 1
+            
+            f.write("0\nENDSEC\n")
             f.write("0\nEOF\n")
+    
+    def calculate_frame_coordinates(self, box_index, polygons_data):
+        """Calculate frame coordinates for manual DXF creation"""
+        if box_index is not None:
+            cell_size_world = self.canvas.grid_size
+            grid_x_world = self.canvas.grid_offset_x
+            grid_y_world = self.canvas.grid_offset_y
+            
+            row = box_index // 6
+            col = box_index % 6
+            
+            box_min_x = grid_x_world + col * cell_size_world
+            box_min_y = grid_y_world + row * cell_size_world
+            box_max_x = box_min_x + cell_size_world
+            box_max_y = box_min_y + cell_size_world
+            
+            frame_margin = 20
+            return [
+                (box_min_x - frame_margin, box_min_y - frame_margin),
+                (box_max_x + frame_margin, box_min_y - frame_margin),
+                (box_max_x + frame_margin, box_max_y + frame_margin),
+                (box_min_x - frame_margin, box_max_y + frame_margin),
+                (box_min_x - frame_margin, box_min_y - frame_margin)
+            ]
+        elif polygons_data:
+            min_x = min_y = float('inf')
+            max_x = max_y = float('-inf')
+            
+            for poly_data in polygons_data:
+                bounds = poly_data['polygon'].bounds
+                min_x = min(min_x, bounds[0])
+                min_y = min(min_y, bounds[1])
+                max_x = max(max_x, bounds[2])
+                max_y = max(max_y, bounds[3])
+            
+            frame_margin = 20
+            return [
+                (min_x - frame_margin, min_y - frame_margin),
+                (max_x + frame_margin, min_y - frame_margin),
+                (max_x + frame_margin, max_y + frame_margin),
+                (min_x - frame_margin, max_y + frame_margin),
+                (min_x - frame_margin, min_y - frame_margin)
+            ]
+        return None
     
     def get_autocad_color_index(self, color):
         """Convert QColor to AutoCAD color index (simplified mapping)"""
