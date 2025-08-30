@@ -8,6 +8,8 @@ import sys
 import csv
 import json
 import math
+import numpy as np
+from scipy.interpolate import splprep, splev
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
     QFrame, QLabel, QPushButton, QFileDialog, QCheckBox, QSpinBox, QLineEdit, QInputDialog, QMessageBox
@@ -53,6 +55,20 @@ class Canvas(QWidget):
         self.duplicate_mode = False  # Whether to create 8 copies of each polygon
         self.next_group_id = 1  # Counter for assigning group IDs to duplicate sets
         
+        # Line mode
+        self.line_mode = False  # Whether to draw lines and create square polygons along them
+        self.line_start_point = None  # Starting point for line drawing
+        self.current_line_end = None  # Current end point while dragging
+        self.is_drawing_line = False  # Whether currently drawing a line
+        self.line_points = []  # List of all points along the free-drawn line
+        self.line_smoothing_factor = 0.05  # Default smoothing factor for splines
+        self.line_polygon_size = 15  # Default size in pixels for line polygons
+        self.num_parallel_lines = 0  # Number of parallel lines on each side
+        
+        # Overlap visualization
+        self.showing_overlaps = False
+        self.overlap_data = []  # List of (poly1_index, poly2_index, overlap_polygon) tuples
+        
         # Center point offset
         self.center_offset_x = 0
         self.center_offset_y = 0
@@ -83,6 +99,9 @@ class Canvas(QWidget):
         self.grid_dragging = False  # Whether we're dragging the grid
         self.grid_drag_start = None  # Starting point for grid drag
         self.grid_drag_world_start = None  # Starting world coordinates for grid drag
+        
+        # Drawing properties
+        self.edge_width = 1.1  # Width for polygon edges
         
         # Enable mouse tracking for cursor display
         self.setMouseTracking(True)
@@ -133,6 +152,25 @@ class Canvas(QWidget):
                             break
                     parent = parent.parent()
             
+            # Exit line mode if active
+            if self.line_mode:
+                self.line_mode = False
+                self.line_points = []
+                self.is_drawing_line = False
+                self.line_start_point = None
+                self.current_line_end = None
+                
+                # Update line checkbox to reflect the change
+                parent = self.parent()
+                while parent:
+                    for child in parent.findChildren(QCheckBox):
+                        if child.text() == "Line" and hasattr(child, 'setChecked'):
+                            child.blockSignals(True)
+                            child.setChecked(False)
+                            child.blockSignals(False)
+                            break
+                    parent = parent.parent()
+            
             # Set cursor to indicate eraser mode
             self.setCursor(Qt.PointingHandCursor)
         else:
@@ -144,6 +182,47 @@ class Canvas(QWidget):
         """Set whether to show the background image"""
         self.show_image = visible
         self.update()  # Refresh display
+    
+    def set_line_mode(self, enabled):
+        """Set whether line mode is enabled"""
+        self.line_mode = enabled
+        if enabled:
+            # Clear any current line drawing state
+            self.line_start_point = None
+            self.current_line_end = None
+            self.is_drawing_line = False
+            self.line_points = []
+            # Exit other modes if active
+            if self.polygon_mode:
+                self.polygon_mode = False
+                self.polygon_points = []
+                self.cursor_timer.stop()
+                
+                # Update polygon checkbox to reflect the change
+                parent = self.parent()
+                while parent:
+                    for child in parent.findChildren(QCheckBox):
+                        if child.text() == "Polygon" and hasattr(child, 'setChecked'):
+                            child.blockSignals(True)
+                            child.setChecked(False)
+                            child.blockSignals(False)
+                            break
+                    parent = parent.parent()
+                    
+            if self.eraser_mode:
+                self.eraser_mode = False
+                
+                # Update eraser checkbox to reflect the change
+                parent = self.parent()
+                while parent:
+                    for child in parent.findChildren(QCheckBox):
+                        if child.text() == "Eraser Mode" and hasattr(child, 'setChecked'):
+                            child.blockSignals(True)
+                            child.setChecked(False)
+                            child.blockSignals(False)
+                            break
+                    parent = parent.parent()
+        self.update()
     
     def get_image_drag_handle_position(self):
         """Get the screen position of the image drag handle (bottom-left of image)"""
@@ -297,6 +376,25 @@ class Canvas(QWidget):
                             break
                     parent = parent.parent()
             
+            # Exit line mode if active
+            if self.line_mode:
+                self.line_mode = False
+                self.line_points = []
+                self.is_drawing_line = False
+                self.line_start_point = None
+                self.current_line_end = None
+                
+                # Update line checkbox to reflect the change
+                parent = self.parent()
+                while parent:
+                    for child in parent.findChildren(QCheckBox):
+                        if child.text() == "Line" and hasattr(child, 'setChecked'):
+                            child.blockSignals(True)
+                            child.setChecked(False)
+                            child.blockSignals(False)
+                            break
+                    parent = parent.parent()
+            
             self.polygon_points = []  # Reset points
             self.setCursor(Qt.BlankCursor)  # Hide cursor, we'll draw our own
             self.cursor_timer.start(50)  # Start cursor updates
@@ -386,58 +484,6 @@ class Canvas(QWidget):
     
 
     
-    def get_average_color_from_background(self, world_points):
-        """Get average color from background image at polygon area"""
-        if not self.background_image or self.background_image.isNull():
-            return QColor(128, 128, 128, 255)  # Default gray, fully opaque if no image
-        
-        try:
-            # Convert QPixmap to QImage for pixel access
-            background_image = self.background_image.toImage()
-            
-            # Convert world coordinates to image coordinates
-            image_points = []
-            for world_x, world_y in world_points:
-                # Account for image offset
-                image_x = world_x - self.image_offset_x
-                image_y = world_y - self.image_offset_y
-                image_points.append((int(image_x), int(image_y)))
-            
-            # Find bounding box of the polygon
-            if not image_points:
-                return QColor(128, 128, 128, 100)
-            
-            min_x = max(0, min(x for x, y in image_points))
-            max_x = min(background_image.width() - 1, max(x for x, y in image_points))
-            min_y = max(0, min(y for x, y in image_points))
-            max_y = min(background_image.height() - 1, max(y for x, y in image_points))
-            
-            # Sample pixels within the polygon bounding box
-            red_sum = green_sum = blue_sum = pixel_count = 0
-            
-            for y in range(min_y, max_y + 1):
-                for x in range(min_x, max_x + 1):
-                    # Simple point-in-polygon test using the bounding box
-                    if self.point_in_polygon(x, y, image_points):
-                        pixel = background_image.pixel(x, y)
-                        red_sum += (pixel >> 16) & 0xFF
-                        green_sum += (pixel >> 8) & 0xFF
-                        blue_sum += pixel & 0xFF
-                        pixel_count += 1
-            
-            if pixel_count > 0:
-                # Calculate average color
-                avg_red = red_sum // pixel_count
-                avg_green = green_sum // pixel_count
-                avg_blue = blue_sum // pixel_count
-                return QColor(avg_red, avg_green, avg_blue, 255)  # Fully opaque
-            else:
-                return QColor(128, 128, 128, 255)  # Default gray, fully opaque
-                
-        except Exception as e:
-            print(f"Error sampling background color: {e}")
-            return QColor(128, 128, 128, 255)  # Default gray, fully opaque on error
-    
     def point_in_polygon(self, x, y, polygon_points):
         """Simple point-in-polygon test using ray casting algorithm"""
         if len(polygon_points) < 3:
@@ -456,12 +502,144 @@ class Canvas(QWidget):
         
         return inside
     
+    def show_overlaps(self):
+        """Toggle overlap visualization"""
+        self.showing_overlaps = not self.showing_overlaps
+        if self.showing_overlaps:
+            self.detect_overlaps()
+        else:
+            self.overlap_data = []
+        self.update()
+    
+    def detect_overlaps(self):
+        """Detect all polygon overlaps and store them for visualization"""
+        from shapely.geometry import Polygon
+        from shapely.errors import TopologicalError
+        
+        self.overlap_data = []
+        
+        # Check all pairs of polygons
+        for i in range(len(self.polygons)):
+            for j in range(i + 1, len(self.polygons)):
+                try:
+                    # Create shapely polygons
+                    poly1_points = self.polygons[i]['points']
+                    poly2_points = self.polygons[j]['points']
+                    
+                    # Skip if not enough points
+                    if len(poly1_points) < 3 or len(poly2_points) < 3:
+                        continue
+                        
+                    poly1 = Polygon(poly1_points)
+                    poly2 = Polygon(poly2_points)
+                    
+                    # Check if polygons are valid
+                    if not poly1.is_valid or not poly2.is_valid:
+                        continue
+                    
+                    # Check for intersection
+                    if poly1.intersects(poly2):
+                        intersection = poly1.intersection(poly2)
+                        
+                        # Only consider significant overlaps (not just edge touches)
+                        if intersection.area > 1.0:  # Minimum overlap area threshold
+                            # Convert intersection back to points list
+                            if intersection.geom_type == 'Polygon':
+                                overlap_points = list(intersection.exterior.coords[:-1])  # Remove duplicate last point
+                                self.overlap_data.append((i, j, overlap_points))
+                            elif intersection.geom_type == 'MultiPolygon':
+                                # Handle multiple overlap areas
+                                for geom in intersection.geoms:
+                                    if geom.geom_type == 'Polygon' and geom.area > 1.0:
+                                        overlap_points = list(geom.exterior.coords[:-1])
+                                        self.overlap_data.append((i, j, overlap_points))
+                                        
+                except (TopologicalError, Exception) as e:
+                    # Skip problematic polygon pairs
+                    continue
+    
+    def polygons_overlap_simple(self, points1, points2):
+        """Simple overlap detection using point-in-polygon tests (fallback method)"""
+        # Check if any vertex of poly1 is inside poly2
+        for point in points1:
+            if self.point_in_polygon(point[0], point[1], points2):
+                return True
+        
+        # Check if any vertex of poly2 is inside poly1
+        for point in points2:
+            if self.point_in_polygon(point[0], point[1], points1):
+                return True
+                
+        # TODO: Could add edge-edge intersection checks for more thorough detection
+        return False
+    
+    def delete_green_polygons(self):
+        """Delete all green (older) overlapping polygons"""
+        if not self.showing_overlaps or not self.overlap_data:
+            # First ensure overlaps are detected
+            self.detect_overlaps()
+            if not self.overlap_data:
+                return  # No overlaps found
+        
+        # Collect indices of polygons to delete (older ones in overlaps)
+        to_delete = set()
+        for i, j, overlap_points in self.overlap_data:
+            # i is the older polygon (lower index), j is newer
+            to_delete.add(i)
+        
+        # Delete polygons in reverse order to maintain correct indices
+        for index in sorted(to_delete, reverse=True):
+            if 0 <= index < len(self.polygons):
+                del self.polygons[index]
+        
+        # Clear overlap data since polygons have changed
+        self.overlap_data = []
+        self.showing_overlaps = False
+        
+        # Update display
+        self.update()
+        print(f"Deleted {len(to_delete)} green (older) overlapping polygons")
+    
+    def delete_red_polygons(self):
+        """Delete all red (newer) overlapping polygons"""
+        if not self.showing_overlaps or not self.overlap_data:
+            # First ensure overlaps are detected
+            self.detect_overlaps()
+            if not self.overlap_data:
+                return  # No overlaps found
+        
+        # Collect indices of polygons to delete (newer ones in overlaps)
+        to_delete = set()
+        for i, j, overlap_points in self.overlap_data:
+            # i is the older polygon (lower index), j is newer
+            to_delete.add(j)
+        
+        # Delete polygons in reverse order to maintain correct indices
+        for index in sorted(to_delete, reverse=True):
+            if 0 <= index < len(self.polygons):
+                del self.polygons[index]
+        
+        # Clear overlap data since polygons have changed
+        self.overlap_data = []
+        self.showing_overlaps = False
+        
+        # Update display
+        self.update()
+        print(f"Deleted {len(to_delete)} red (newer) overlapping polygons")
+    
     def mousePressEvent(self, event):
         """Handle mouse press events"""
         # Ensure canvas has focus for keyboard events
         self.setFocus()
         
-        if event.button() == Qt.LeftButton and self.polygon_mode:
+        if event.button() == Qt.LeftButton and self.line_mode:
+            # In line mode, left click starts line drawing
+            world_x, world_y = self.screen_to_world(event.x(), event.y())
+            self.line_start_point = (world_x, world_y)
+            self.current_line_end = (world_x, world_y)
+            self.is_drawing_line = True
+            self.line_points = [(world_x, world_y)]  # Start with the first point
+        elif event.button() == Qt.LeftButton and self.polygon_mode:
             # In polygon mode, left click adds point to polygon
             self.add_polygon_point(event.x(), event.y())
         elif event.button() == Qt.RightButton and self.polygon_mode:
@@ -516,7 +694,23 @@ class Canvas(QWidget):
     
     def mouseMoveEvent(self, event):
         """Handle mouse move events"""
-        if self.is_erasing:
+        if self.is_drawing_line:
+            # Add points along the path for free drawing
+            world_x, world_y = self.screen_to_world(event.x(), event.y())
+            self.current_line_end = (world_x, world_y)
+            
+            # Add point to path if it's far enough from the last point to avoid too many points
+            if len(self.line_points) == 0:
+                self.line_points.append((world_x, world_y))
+            else:
+                last_x, last_y = self.line_points[-1]
+                distance = math.sqrt((world_x - last_x)**2 + (world_y - last_y)**2)
+                # Only add point if it's at least 5 world units away from last point
+                if distance > 5:
+                    self.line_points.append((world_x, world_y))
+            
+            self.update()  # Refresh to show the line
+        elif self.is_erasing:
             # Continue erasing while dragging
             world_x, world_y = self.screen_to_world(event.x(), event.y())
             self.erase_polygon_at_point(world_x, world_y)
@@ -596,7 +790,15 @@ class Canvas(QWidget):
     
     def mouseReleaseEvent(self, event):
         """Handle mouse release events"""
-        if self.is_erasing:
+        if self.line_mode and self.is_drawing_line:
+            # Finish line drawing and create square polygons along the line
+            self.create_trapezoid_polygons_along_line()
+            self.is_drawing_line = False
+            self.current_line_end = None
+            self.line_start_point = None
+            self.line_points = []  # Clear the line points
+            self.update()
+        elif self.is_erasing:
             # Stop erasing
             self.is_erasing = False
         elif self.is_dragging_control_point:
@@ -628,6 +830,263 @@ class Canvas(QWidget):
             self.is_panning = False
             self.last_pan_point = None
             self.setCursor(Qt.ArrowCursor if not self.polygon_mode else Qt.BlankCursor)
+    
+    def create_smooth_spline(self, points, num_points=None):
+        """Create a smooth spline from the given points"""
+        if len(points) < 3:
+            return points, None  # Need at least 3 points for spline
+            
+        try:
+            # Convert points to numpy arrays for x and y coordinates
+            x_coords = np.array([p[0] for p in points])
+            y_coords = np.array([p[1] for p in points])
+            
+            # Create parametric spline representation
+            # s controls smoothing: 0=interpolate exactly, higher values=more smoothing
+            # k=3 means cubic spline (can be 1-5, 3 is good for smoothness)
+            
+            # Calculate smoothing factor based on number of points and their spread
+            # More aggressive smoothing for hand-drawn lines
+            num_points_factor = len(points)
+            coordinate_range = max(max(x_coords) - min(x_coords), max(y_coords) - min(y_coords))
+            smoothing_factor = coordinate_range * num_points_factor * self.line_smoothing_factor
+            
+            tck, u = splprep([x_coords, y_coords], s=smoothing_factor, k=min(3, len(points)-1))
+            
+            # If num_points not specified, use 5x the original number of points for smoothness
+            if num_points is None:
+                num_points = len(points) * 5
+                
+            # Generate evenly spaced parameters for smooth curve
+            u_new = np.linspace(0, 1, num_points)
+            
+            # Evaluate the spline at the new parameters
+            smooth_coords = splev(u_new, tck)
+            
+            # Convert back to list of tuples
+            smooth_points = list(zip(smooth_coords[0], smooth_coords[1]))
+            
+            return smooth_points, (tck, u_new)
+            
+        except Exception as e:
+            print(f"Spline creation failed: {e}")
+            return points, None  # Return original points if spline fails
+    
+    def get_spline_angle_at_parameter(self, tck, u_param):
+        """Calculate the tangent angle of the spline at a given parameter u"""
+        try:
+            # Calculate first derivative (tangent vector) at the parameter
+            derivatives = splev(u_param, tck, der=1)
+            dx_du = derivatives[0]
+            dy_du = derivatives[1]
+            
+            # Calculate angle from tangent vector
+            angle = math.atan2(dy_du, dx_du)
+            return angle
+            
+        except Exception as e:
+            print(f"Angle calculation failed: {e}")
+            return 0  # Return 0 angle if calculation fails
+    
+    def create_trapezoid_polygons_along_line(self):
+        """Create trapezoid polygons along the drawn line and parallel lines on both sides"""
+        if len(self.line_points) < 2:
+            return
+            
+        # Create smooth spline from the original line points
+        smooth_points, spline_data = self.create_smooth_spline(self.line_points)
+        
+        if len(smooth_points) < 2:
+            return
+            
+        # Create polygons along the main line and all parallel lines
+        self.create_polygons_along_single_line(smooth_points, spline_data, 0)  # Main line (offset = 0)
+        
+        # Create parallel lines on both sides
+        for line_number in range(1, self.num_parallel_lines + 1):
+            offset_distance = (self.line_polygon_size + 2) * line_number  # Increased gap from +1 to +5
+            
+            # Create line on positive side (right side when walking along the path)
+            self.create_polygons_along_single_line(smooth_points, spline_data, offset_distance)
+            
+            # Create line on negative side (left side when walking along the path)
+            self.create_polygons_along_single_line(smooth_points, spline_data, -offset_distance)
+    
+    def create_polygons_along_single_line(self, smooth_points, spline_data, offset_distance):
+        """Create trapezoid polygons along a single line (original or parallel offset line)"""
+        # Use configurable square size directly - painter scaling handles zoom
+        square_size = self.line_polygon_size
+        half_size = square_size / 2
+        
+        # If offset_distance is not 0, we need to create offset smooth points
+        if offset_distance != 0:
+            offset_smooth_points = self.create_offset_line(smooth_points, spline_data, offset_distance)
+            if len(offset_smooth_points) < 2:
+                return
+        else:
+            offset_smooth_points = smooth_points
+        
+        # Calculate total path length and segment lengths for the (possibly offset) line
+        total_path_length = 0
+        segment_lengths = []
+        for i in range(len(offset_smooth_points) - 1):
+            x1, y1 = offset_smooth_points[i]
+            x2, y2 = offset_smooth_points[i + 1]
+            segment_length = math.sqrt((x2 - x1)**2 + (y2 - y1)**2)
+            segment_lengths.append(segment_length)
+            total_path_length += segment_length
+        
+        if total_path_length == 0:
+            return
+            
+        # Use distance-based spacing for consistent polygon sizes
+        gap_screen = 2  # Small gap between polygons
+        step_size = square_size + gap_screen  # Distance between polygon centers
+        
+        # But each trapezoid should be smaller than step_size to create the gap
+        trapezoid_width = square_size  # Keep trapezoid width equal to square_size
+        
+        num_polygons = int(total_path_length / step_size)
+        
+        if num_polygons == 0:
+            return
+            
+        # Helper function to find position and angle at a given distance along the offset line
+        def get_position_and_angle_at_distance(target_distance):
+            current_distance = 0
+            for segment_index in range(len(segment_lengths)):
+                segment_end_distance = current_distance + segment_lengths[segment_index]
+                
+                if target_distance <= segment_end_distance:
+                    segment_progress = (target_distance - current_distance) / segment_lengths[segment_index]
+                    
+                    # Interpolate position along the offset line
+                    x1, y1 = offset_smooth_points[segment_index]
+                    x2, y2 = offset_smooth_points[segment_index + 1]
+                    center_x = x1 + segment_progress * (x2 - x1)
+                    center_y = y1 + segment_progress * (y2 - y1)
+                    
+                    # Calculate angle using the original spline data
+                    if spline_data is not None:
+                        tck, u_new = spline_data
+                        u_param = (segment_index + segment_progress) / len(smooth_points)
+                        angle = self.get_spline_angle_at_parameter(tck, u_param)
+                    else:
+                        # Use direction of the original line for angle
+                        orig_x1, orig_y1 = smooth_points[segment_index]
+                        orig_x2, orig_y2 = smooth_points[segment_index + 1]
+                        dx = orig_x2 - orig_x1
+                        dy = orig_y2 - orig_y1
+                        angle = math.atan2(dy, dx)
+                    
+                    return center_x, center_y, angle
+                    
+                current_distance = segment_end_distance
+            
+            # If we reach here, return the last point
+            last_point = offset_smooth_points[-1]
+            if spline_data is not None:
+                tck, u_new = spline_data
+                last_angle = self.get_spline_angle_at_parameter(tck, 1.0)
+            else:
+                dx = smooth_points[-1][0] - smooth_points[-2][0]
+                dy = smooth_points[-1][1] - smooth_points[-2][1]
+                last_angle = math.atan2(dy, dx)
+            return last_point[0], last_point[1], last_angle
+        
+        # Create trapezoids using distance-based spacing
+        for polygon_index in range(num_polygons):
+            # Calculate center distance for this polygon
+            center_distance = (polygon_index + 0.5) * step_size
+            
+            if center_distance >= total_path_length:
+                break
+                
+            # Get position and angle at center
+            center_x, center_y, center_angle = get_position_and_angle_at_distance(center_distance)
+            
+            # Calculate start and end distances for the trapezoid
+            half_trapezoid_width = trapezoid_width / 2
+            start_distance = max(0, center_distance - half_trapezoid_width)
+            end_distance = min(total_path_length, center_distance + half_trapezoid_width)
+            
+            # Get positions and angles at start and end
+            start_x, start_y, start_angle = get_position_and_angle_at_distance(start_distance)
+            end_x, end_y, end_angle = get_position_and_angle_at_distance(end_distance)
+            
+            # Create perpendicular lines at start and end positions
+            start_perp_angle = start_angle + math.pi/2
+            start_cos_perp = math.cos(start_perp_angle)
+            start_sin_perp = math.sin(start_perp_angle)
+            line_start_p1 = (start_x + start_cos_perp * half_size, start_y + start_sin_perp * half_size)
+            line_start_p2 = (start_x - start_cos_perp * half_size, start_y - start_sin_perp * half_size)
+            
+            end_perp_angle = end_angle + math.pi/2
+            end_cos_perp = math.cos(end_perp_angle)
+            end_sin_perp = math.sin(end_perp_angle)
+            line_end_p1 = (end_x + end_cos_perp * half_size, end_y + end_sin_perp * half_size)
+            line_end_p2 = (end_x - end_cos_perp * half_size, end_y - end_sin_perp * half_size)
+            
+            # Create trapezoid from the 4 endpoints of the two lines
+            polygon_points = [
+                line_start_p1,
+                line_start_p2, 
+                line_end_p2,
+                line_end_p1
+            ]
+            
+            # Create polygon data
+            polygon_data = {
+                'points': polygon_points,
+                'color': QColor(0, 0, 0, 0),  # Transparent fill
+                'frame_color': QColor(0, 0, 0, 255),  # Black frame
+                'group_id': None  # Line polygons are not grouped
+            }
+            
+            self.polygons.append(polygon_data)
+    
+    def create_offset_line(self, smooth_points, spline_data, offset_distance):
+        """Create an offset line parallel to the original line at the given distance"""
+        offset_points = []
+        
+        for i in range(len(smooth_points)):
+            x, y = smooth_points[i]
+            
+            # Get the angle of the original line at this point
+            if spline_data is not None:
+                tck, u_new = spline_data
+                u_param = i / (len(smooth_points) - 1) if len(smooth_points) > 1 else 0
+                angle = self.get_spline_angle_at_parameter(tck, u_param)
+            else:
+                # Calculate angle from adjacent points
+                if i == 0 and len(smooth_points) > 1:
+                    dx = smooth_points[1][0] - smooth_points[0][0]
+                    dy = smooth_points[1][1] - smooth_points[0][1]
+                elif i == len(smooth_points) - 1 and len(smooth_points) > 1:
+                    dx = smooth_points[i][0] - smooth_points[i-1][0]
+                    dy = smooth_points[i][1] - smooth_points[i-1][1]
+                elif len(smooth_points) > 2:
+                    # Average of forward and backward directions
+                    dx1 = smooth_points[i][0] - smooth_points[i-1][0]
+                    dy1 = smooth_points[i][1] - smooth_points[i-1][1]
+                    dx2 = smooth_points[i+1][0] - smooth_points[i][0]
+                    dy2 = smooth_points[i+1][1] - smooth_points[i][1]
+                    dx = (dx1 + dx2) / 2
+                    dy = (dy1 + dy2) / 2
+                else:
+                    dx, dy = 1, 0  # Default direction
+                angle = math.atan2(dy, dx)
+            
+            # Calculate perpendicular angle (90 degrees to the right)
+            perp_angle = angle + math.pi/2
+            
+            # Calculate offset position
+            offset_x = x + offset_distance * math.cos(perp_angle)
+            offset_y = y + offset_distance * math.sin(perp_angle)
+            
+            offset_points.append((offset_x, offset_y))
+        
+        return offset_points
     
     def update_group_control_points_after_drag(self, group_id):
         """Update control points of all copies in the group based on the original polygon's new position"""
@@ -698,7 +1157,7 @@ class Canvas(QWidget):
         
         # Limit zoom range
         new_zoom = self.zoom_factor * zoom_factor
-        if 0.1 <= new_zoom <= 10.0:
+        if 0.001 <= new_zoom <= 1000.0:
             self.zoom_factor = new_zoom
             
             # Adjust pan offset to keep mouse position fixed
@@ -889,13 +1348,17 @@ class Canvas(QWidget):
                 # Highlight selected polygon
                 if i == self.selected_polygon_index:
                     # Draw thicker red border for selected polygon
-                    painter.setPen(QPen(QColor(255, 0, 0), 3))  # Red thick border
+                    painter.setPen(QPen(QColor(255, 0, 0), max(0.5, self.edge_width * self.zoom_factor)))  # Red thick border
                 else:
                     # Use the polygon's frame color
-                    painter.setPen(QPen(frame_color, 2))  # Use frame color with thickness 2
+                    painter.setPen(QPen(frame_color, max(0.5, self.edge_width * self.zoom_factor)))  # Use frame color with configurable thickness
                 
                 painter.setBrush(QBrush(color))
                 painter.drawPolygon(qpolygon)
+        
+        # Draw overlap visualization if enabled
+        if self.showing_overlaps:
+            self.draw_overlap_visualization(painter)
         
         # Draw control points for the selected polygon
         if self.selected_polygon_index >= 0:
@@ -947,6 +1410,24 @@ class Canvas(QWidget):
                         x1, y1 = screen_points[i]
                         x2, y2 = screen_points[i + 1]
                         painter.drawLine(int(x1), int(y1), int(x2), int(y2))
+        
+        # Draw current line being drawn in line mode
+        if self.line_mode and self.is_drawing_line and len(self.line_points) > 1:
+            # Draw the original line in light red
+            painter.setPen(QPen(QColor(255, 150, 150), 1))  # Light red line
+            for i in range(len(self.line_points) - 1):
+                start_x, start_y = self.world_to_screen(self.line_points[i][0], self.line_points[i][1])
+                end_x, end_y = self.world_to_screen(self.line_points[i + 1][0], self.line_points[i + 1][1])
+                painter.drawLine(int(start_x), int(start_y), int(end_x), int(end_y))
+            
+            # Draw the smooth spline in green for preview
+            if len(self.line_points) >= 3:  # Need at least 3 points for spline
+                smooth_points, _ = self.create_smooth_spline(self.line_points)
+                painter.setPen(QPen(QColor(0, 255, 0), 2))  # Green smooth line
+                for i in range(len(smooth_points) - 1):
+                    start_x, start_y = self.world_to_screen(smooth_points[i][0], smooth_points[i][1])
+                    end_x, end_y = self.world_to_screen(smooth_points[i + 1][0], smooth_points[i + 1][1])
+                    painter.drawLine(int(start_x), int(start_y), int(end_x), int(end_y))
     
     def draw_control_points(self, painter):
         """Draw control points for the selected polygon"""
@@ -974,6 +1455,55 @@ class Canvas(QWidget):
             half_size = self.control_point_size // 2
             painter.drawEllipse(int(screen_x - half_size), int(screen_y - half_size),
                               self.control_point_size, self.control_point_size)
+    
+    def draw_overlap_visualization(self, painter):
+        """Draw overlap visualization with color-coded polygons"""
+        # First, color the overlapping polygons
+        for poly1_idx, poly2_idx, overlap_points in self.overlap_data:
+            # Color older polygon (lower index) in green
+            older_idx = min(poly1_idx, poly2_idx)
+            newer_idx = max(poly1_idx, poly2_idx)
+            
+            # Draw older polygon in semi-transparent green
+            older_polygon = self.polygons[older_idx]
+            points = older_polygon['points']
+            if len(points) >= 3:
+                screen_points = []
+                for world_x, world_y in points:
+                    screen_x, screen_y = self.world_to_screen(world_x, world_y)
+                    screen_points.append(QPoint(int(screen_x), int(screen_y)))
+                
+                qpolygon = QPolygon(screen_points)
+                painter.setPen(QPen(QColor(0, 150, 0), max(1.0, self.edge_width * self.zoom_factor * 1.5)))  # Thick green border
+                painter.setBrush(QBrush(QColor(0, 255, 0, 100)))  # Semi-transparent green fill
+                painter.drawPolygon(qpolygon)
+            
+            # Draw newer polygon in semi-transparent red
+            newer_polygon = self.polygons[newer_idx]
+            points = newer_polygon['points']
+            if len(points) >= 3:
+                screen_points = []
+                for world_x, world_y in points:
+                    screen_x, screen_y = self.world_to_screen(world_x, world_y)
+                    screen_points.append(QPoint(int(screen_x), int(screen_y)))
+                
+                qpolygon = QPolygon(screen_points)
+                painter.setPen(QPen(QColor(150, 0, 0), max(1.0, self.edge_width * self.zoom_factor * 1.5)))  # Thick red border
+                painter.setBrush(QBrush(QColor(255, 0, 0, 100)))  # Semi-transparent red fill
+                painter.drawPolygon(qpolygon)
+        
+        # Then, draw the actual overlap areas in bright yellow
+        for poly1_idx, poly2_idx, overlap_points in self.overlap_data:
+            if len(overlap_points) >= 3:
+                screen_points = []
+                for world_x, world_y in overlap_points:
+                    screen_x, screen_y = self.world_to_screen(world_x, world_y)
+                    screen_points.append(QPoint(int(screen_x), int(screen_y)))
+                
+                qpolygon = QPolygon(screen_points)
+                painter.setPen(QPen(QColor(255, 255, 0), max(2.0, self.edge_width * self.zoom_factor * 2)))  # Thick yellow border
+                painter.setBrush(QBrush(QColor(255, 255, 0, 150)))  # Semi-transparent yellow fill
+                painter.drawPolygon(qpolygon)
 
     def draw_grid(self, painter):
         """Draw the 3x3 grid overlay with draggable handle that scales with zoom"""
@@ -1093,8 +1623,39 @@ class SidePanel(QFrame):
         # Create layout for the panel
         layout = QVBoxLayout()
         
+        # Add buttons for left panel
+        if title == "Left Panel" and canvas:
+            # Add overlap detection button
+            overlap_button = QPushButton("Show Overlaps")
+            overlap_button.clicked.connect(self.canvas.show_overlaps)
+            layout.addWidget(overlap_button)
+            
+            # Add delete green polygons button
+            delete_green_button = QPushButton("Delete Green")
+            delete_green_button.setToolTip("Delete all green (older) overlapping polygons")
+            delete_green_button.clicked.connect(self.canvas.delete_green_polygons)
+            layout.addWidget(delete_green_button)
+            
+            # Add delete red polygons button
+            delete_red_button = QPushButton("Delete Red")
+            delete_red_button.setToolTip("Delete all red (newer) overlapping polygons")
+            delete_red_button.clicked.connect(self.canvas.delete_red_polygons)
+            layout.addWidget(delete_red_button)
+            
+            # Add stretch to push save/load buttons to bottom
+            layout.addStretch()
+            
+            # Add save and load array buttons at the bottom
+            save_array_button = QPushButton("Save Array")
+            save_array_button.clicked.connect(self.save_array)
+            layout.addWidget(save_array_button)
+            
+            load_array_button = QPushButton("Load Array")
+            load_array_button.clicked.connect(self.load_array)
+            layout.addWidget(load_array_button)
+        
         # Add buttons for right panel
-        if title == "Right Panel" and canvas:
+        elif title == "Right Panel" and canvas:
             load_bg_button = QPushButton("Load Background")
             load_bg_button.clicked.connect(self.load_background)
             layout.addWidget(load_bg_button)
@@ -1113,6 +1674,41 @@ class SidePanel(QFrame):
             self.duplicate_checkbox = QCheckBox("Duplicate")
             self.duplicate_checkbox.toggled.connect(self.on_duplicate_toggled)
             layout.addWidget(self.duplicate_checkbox)
+            
+            # Add line mode checkbox
+            self.line_checkbox = QCheckBox("Line")
+            self.line_checkbox.toggled.connect(self.on_line_toggled)
+            layout.addWidget(self.line_checkbox)
+            
+            # Add smoothing parameter input
+            smoothing_label = QLabel('Line Smoothing:')
+            layout.addWidget(smoothing_label)
+            
+            self.smoothing_input = QLineEdit()
+            self.smoothing_input.setText('0.05')  # Default value
+            self.smoothing_input.setPlaceholderText('Enter smoothing factor (0.01-2.0)')
+            self.smoothing_input.textChanged.connect(self.on_smoothing_changed)
+            layout.addWidget(self.smoothing_input)
+            
+            # Add polygon size parameter input
+            polygon_size_label = QLabel('Polygon Size (pixels):')
+            layout.addWidget(polygon_size_label)
+            
+            self.polygon_size_input = QLineEdit()
+            self.polygon_size_input.setText('15')  # Default value
+            self.polygon_size_input.setPlaceholderText('Enter polygon size in pixels')
+            self.polygon_size_input.textChanged.connect(self.on_polygon_size_changed)
+            layout.addWidget(self.polygon_size_input)
+            
+            # Parallel lines input
+            parallel_lines_label = QLabel('Parallel Lines (each side):')
+            layout.addWidget(parallel_lines_label)
+            
+            self.parallel_lines_input = QLineEdit()
+            self.parallel_lines_input.setText('0')  # Default value - no parallel lines
+            self.parallel_lines_input.setPlaceholderText('Enter number of parallel lines on each side')
+            self.parallel_lines_input.textChanged.connect(self.on_parallel_lines_changed)
+            layout.addWidget(self.parallel_lines_input)
             
             # Add show image checkbox
             self.show_image_checkbox = QCheckBox("Show Image")
@@ -1156,17 +1752,20 @@ class SidePanel(QFrame):
             self.grid_size_input.textChanged.connect(self.on_grid_size_changed)
             layout.addWidget(self.grid_size_input)
             
-            # Add save and load array buttons
-            save_array_button = QPushButton("Save Array")
-            save_array_button.clicked.connect(self.save_array)
-            layout.addWidget(save_array_button)
+            # Edge width input
+            edge_width_label = QLabel('Edge Width:')
+            layout.addWidget(edge_width_label)
             
-            load_array_button = QPushButton("Load Array")
-            load_array_button.clicked.connect(self.load_array)
-            layout.addWidget(load_array_button)
+            self.edge_width_input = QLineEdit()
+            self.edge_width_input.setText('1.1')
+            self.edge_width_input.setPlaceholderText('Enter edge width (e.g., 1.1)')
+            self.edge_width_input.textChanged.connect(self.on_edge_width_changed)
+            layout.addWidget(self.edge_width_input)
+            
+            # Add stretch to push content to top (only for right panel)
+            layout.addStretch()
         
-        # Add stretch to push content to top
-        layout.addStretch()
+        # For left panel, stretch was already added before save/load buttons
         
         self.setLayout(layout)
     
@@ -1211,6 +1810,47 @@ class SidePanel(QFrame):
         if self.canvas:
             self.canvas.duplicate_mode = checked
     
+    def on_line_toggled(self, checked):
+        """Handle line mode checkbox toggle"""
+        if self.canvas:
+            self.canvas.set_line_mode(checked)
+    
+    def on_smoothing_changed(self, text):
+        """Handle smoothing parameter text change"""
+        if self.canvas:
+            try:
+                smoothing_value = float(text)
+                # Clamp the value between reasonable bounds
+                smoothing_value = max(0.0, min(5.0, smoothing_value))
+                self.canvas.line_smoothing_factor = smoothing_value
+            except ValueError:
+                # If invalid input, keep the current value
+                pass
+    
+    def on_polygon_size_changed(self, text):
+        """Handle polygon size parameter text change"""
+        if self.canvas:
+            try:
+                size_value = float(text)
+                # Clamp the value between reasonable bounds (1 to 100 pixels)
+                size_value = max(1.0, min(100.0, size_value))
+                self.canvas.line_polygon_size = size_value
+            except ValueError:
+                # If invalid input, keep the current value
+                pass
+    
+    def on_parallel_lines_changed(self, text):
+        """Handle parallel lines parameter text change"""
+        if self.canvas:
+            try:
+                lines_value = int(text)
+                # Clamp the value between reasonable bounds (0 to 10 parallel lines per side)
+                lines_value = max(0, min(10, lines_value))
+                self.canvas.num_parallel_lines = lines_value
+            except ValueError:
+                # If invalid input, keep the current value
+                pass
+    
     def on_show_image_toggled(self, checked):
         """Handle show image checkbox toggle"""
         if self.canvas:
@@ -1236,6 +1876,23 @@ class SidePanel(QFrame):
                 self.canvas.grid_size = grid_size
                 # Re-center grid on image if there's an image loaded
                 self.canvas.center_grid_on_image()
+                self.canvas.update()
+        except ValueError:
+            # Invalid input, ignore
+            pass
+    
+    def on_edge_width_changed(self):
+        """Handle edge width changes"""
+        try:
+            text = self.edge_width_input.text().strip()
+            if not text:
+                return  # Don't change anything for empty input
+                
+            width = float(text)
+            width = max(0.1, min(10.0, width))  # Clamp between 0.1 and 10.0
+            
+            if self.canvas:
+                self.canvas.edge_width = width
                 self.canvas.update()
         except ValueError:
             # Invalid input, ignore
@@ -1476,12 +2133,13 @@ class MandalaMosaicWindow(QMainWindow):
         main_layout.setSpacing(10)
         main_layout.setContentsMargins(10, 10, 10, 10)
         
-        # Create left panel
-        left_panel = SidePanel("Left Panel")
-        main_layout.addWidget(left_panel)
-        
         # Create central canvas
         canvas = Canvas()
+        
+        # Create left panel (with reference to canvas for overlap functions)
+        left_panel = SidePanel("Left Panel", canvas)
+        main_layout.addWidget(left_panel)
+        
         main_layout.addWidget(canvas, 1)  # Give canvas stretch factor of 1
         
         # Create right panel (with reference to canvas for background loading)

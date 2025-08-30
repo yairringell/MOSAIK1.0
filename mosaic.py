@@ -104,7 +104,7 @@ print(f"Image will be resized so its longer side is {long_side_size} pixels.")
  
 
 # Parameters
-half_tile =8 # 4...30 => half size of mosaic tile
+half_tile =6 # 4...30 => half size of mosaic tile
 GAUSS = 8 # 0...8 => blurs image before edge detection (check "edges" image for a good value)
 EDGE_DETECTION = 'HED' # HED or DiBlasi
 WITH_FRAME = True # default is True => control about guidelines along image borders
