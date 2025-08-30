@@ -8,6 +8,7 @@ import sys
 import csv
 import json
 import math
+import random
 import numpy as np
 from scipy.interpolate import splprep, splev
 from PyQt5.QtWidgets import (
@@ -512,11 +513,14 @@ class Canvas(QWidget):
         self.update()
     
     def detect_overlaps(self):
-        """Detect all polygon overlaps and store them for visualization"""
+        """Detect all polygon overlaps and store them for visualization, including frame overlaps"""
         from shapely.geometry import Polygon
         from shapely.errors import TopologicalError
         
         self.overlap_data = []
+        
+        # Buffer amount is half the edge width to account for frame thickness
+        buffer_amount = self.edge_width / 2.0
         
         # Check all pairs of polygons
         for i in range(len(self.polygons)):
@@ -537,9 +541,13 @@ class Canvas(QWidget):
                     if not poly1.is_valid or not poly2.is_valid:
                         continue
                     
-                    # Check for intersection
-                    if poly1.intersects(poly2):
-                        intersection = poly1.intersection(poly2)
+                    # Buffer polygons to account for frame thickness
+                    poly1_buffered = poly1.buffer(buffer_amount)
+                    poly2_buffered = poly2.buffer(buffer_amount)
+                    
+                    # Check for intersection of buffered polygons (includes frame overlap)
+                    if poly1_buffered.intersects(poly2_buffered):
+                        intersection = poly1_buffered.intersection(poly2_buffered)
                         
                         # Only consider significant overlaps (not just edge touches)
                         if intersection.area > 1.0:  # Minimum overlap area threshold
@@ -1014,18 +1022,22 @@ class Canvas(QWidget):
             start_x, start_y, start_angle = get_position_and_angle_at_distance(start_distance)
             end_x, end_y, end_angle = get_position_and_angle_at_distance(end_distance)
             
+            # Random size variation: 80% to 100% of original size
+            size_variation = random.uniform(0.8, 1.0)
+            random_half_size = half_size * size_variation
+            
             # Create perpendicular lines at start and end positions
             start_perp_angle = start_angle + math.pi/2
             start_cos_perp = math.cos(start_perp_angle)
             start_sin_perp = math.sin(start_perp_angle)
-            line_start_p1 = (start_x + start_cos_perp * half_size, start_y + start_sin_perp * half_size)
-            line_start_p2 = (start_x - start_cos_perp * half_size, start_y - start_sin_perp * half_size)
+            line_start_p1 = (start_x + start_cos_perp * random_half_size, start_y + start_sin_perp * random_half_size)
+            line_start_p2 = (start_x - start_cos_perp * random_half_size, start_y - start_sin_perp * random_half_size)
             
             end_perp_angle = end_angle + math.pi/2
             end_cos_perp = math.cos(end_perp_angle)
             end_sin_perp = math.sin(end_perp_angle)
-            line_end_p1 = (end_x + end_cos_perp * half_size, end_y + end_sin_perp * half_size)
-            line_end_p2 = (end_x - end_cos_perp * half_size, end_y - end_sin_perp * half_size)
+            line_end_p1 = (end_x + end_cos_perp * random_half_size, end_y + end_sin_perp * random_half_size)
+            line_end_p2 = (end_x - end_cos_perp * random_half_size, end_y - end_sin_perp * random_half_size)
             
             # Create trapezoid from the 4 endpoints of the two lines
             polygon_points = [
@@ -1035,9 +1047,18 @@ class Canvas(QWidget):
                 line_end_p1
             ]
             
+            # Add random movement to each control point (-1 to +1 pixels on X and Y)
+            randomized_polygon_points = []
+            for point in polygon_points:
+                x, y = point
+                random_x_offset = random.uniform(-1, 1)
+                random_y_offset = random.uniform(-1, 1)
+                randomized_point = (x + random_x_offset, y + random_y_offset)
+                randomized_polygon_points.append(randomized_point)
+            
             # Create polygon data
             polygon_data = {
-                'points': polygon_points,
+                'points': randomized_polygon_points,
                 'color': QColor(0, 0, 0, 0),  # Transparent fill
                 'frame_color': QColor(0, 0, 0, 255),  # Black frame
                 'group_id': None  # Line polygons are not grouped
