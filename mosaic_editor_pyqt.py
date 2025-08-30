@@ -20,7 +20,7 @@ import random
 
 
 class ColorPaletteWidget(QWidget):
-    """Widget that displays a color palette extracted from color_palette2.csv"""
+    """Widget that displays a color palette extracted from color_palette3.csv"""
     
     color_selected = pyqtSignal(QColor)  # Signal emitted when a color is selected
     
@@ -31,7 +31,7 @@ class ColorPaletteWidget(QWidget):
         self.color_size = 20  # Size of each color square (20x20 pixels)
         self.selected_color_width = 40  # Width of selected color rectangle
         self.selected_color_height = 20  # Height of selected color rectangle
-        self.palette_file = palette_file or 'color_palette2.csv'  # Default palette file
+        self.palette_file = palette_file or 'color_palette3.csv'  # Default palette file
         self.setFixedHeight(60)  # Fixed height for the palette (adjusted for larger squares)
         self.setMinimumWidth(450)  # Increased slightly to accommodate selection rectangle next to palette
         self.load_palette_colors()
@@ -69,7 +69,7 @@ class ColorPaletteWidget(QWidget):
         
         # Try CSV format (fallback or default)
         if self.palette_file.endswith('.csv') or not self.colors:
-            csv_path = os.path.join(os.path.dirname(__file__), 'color_palette2.csv')
+            csv_path = os.path.join(os.path.dirname(__file__), 'color_palette3.csv')
             if os.path.exists(csv_path):
                 try:
                     with open(csv_path, 'r', encoding='utf-8') as file:
@@ -95,17 +95,9 @@ class ColorPaletteWidget(QWidget):
                     print(f"Error loading CSV palette: {e}")
         
         # Load default colors if nothing else worked
-        self.load_default_colors()
-    
-    def load_default_colors(self):
-        """Load default colors if color_palette2.csv is not available"""
-        default_colors = [
-            '#FF0000', '#00FF00', '#0000FF', '#FFFF00', '#FF00FF', '#00FFFF',
-            '#800000', '#008000', '#000080', '#808000', '#800080', '#008080',
-            '#FFA500', '#FFC0CB', '#800080', '#A52A2A', '#D2691E', '#FF1493',
-            '#32CD32', '#FF69B4', '#DC143C', '#00CED1', '#FF6347', '#4B0082'
-        ]
-        self.colors = [QColor(color) for color in default_colors]
+        if not self.colors:
+            self.colors = [QColor('#FF0000'), QColor('#00FF00'), QColor('#0000FF'), 
+                          QColor('#FFFF00'), QColor('#FF00FF'), QColor('#00FFFF')]
     
     def change_palette(self, csv_file_path):
         """Change to a different CSV palette file and reload colors"""
@@ -136,12 +128,12 @@ class ColorPaletteWidget(QWidget):
                 self.update()  # Trigger repaint
                 return True
             else:
-                self.load_default_colors()
+                self.colors = [QColor('#FF0000'), QColor('#00FF00'), QColor('#0000FF')]
                 return False
                 
         except Exception as e:
             print(f"Error loading palette {csv_file_path}: {e}")
-            self.load_default_colors()
+            self.colors = [QColor('#FF0000'), QColor('#00FF00'), QColor('#0000FF')]
             return False
     
     def paintEvent(self, event):
@@ -2171,10 +2163,15 @@ class MosaicEditor(QMainWindow):
         self.bg_color_btn.setToolTip("Set background to selected color")
         left_panel_layout.addWidget(self.bg_color_btn)
         
-        # Colorize button
-        self.colorize_btn = QPushButton("Colorize")
-        self.colorize_btn.setToolTip("Convert all tile colors to closest palette colors")
-        left_panel_layout.addWidget(self.colorize_btn)
+        # Colorize CIE button
+        self.colorize_cie_btn = QPushButton("Colorize CIE")
+        self.colorize_cie_btn.setToolTip("Convert all tile colors using CIE Delta E 2000 (most perceptually accurate)")
+        left_panel_layout.addWidget(self.colorize_cie_btn)
+        
+        # Colorize HSV button
+        self.colorize_hsv_btn = QPushButton("Colorize HSV")
+        self.colorize_hsv_btn.setToolTip("Convert all tile colors using HSV color space distance")
+        left_panel_layout.addWidget(self.colorize_hsv_btn)
         
         # Choose Palette button
         self.choose_palette_btn = QPushButton("Choose Palette")
@@ -2262,7 +2259,8 @@ class MosaicEditor(QMainWindow):
         
         # Left panel signals
         self.bg_color_btn.clicked.connect(self.on_bg_color_clicked)
-        self.colorize_btn.clicked.connect(self.on_colorize_clicked)
+        self.colorize_cie_btn.clicked.connect(self.on_colorize_cie_clicked)
+        self.colorize_hsv_btn.clicked.connect(self.on_colorize_hsv_clicked)
         self.choose_palette_btn.clicked.connect(self.on_choose_palette_clicked)
         self.reduce_colors_btn.clicked.connect(self.on_reduce_colors_clicked)
         self.overlap_btn.clicked.connect(self.on_overlap_check_clicked)
@@ -2419,8 +2417,8 @@ class MosaicEditor(QMainWindow):
             self.canvas_container.canvas.canvas_background_color = self.selected_palette_color
             self.canvas_container.canvas.update()
     
-    def on_colorize_clicked(self):
-        """Handle Colorize button click - convert all tile colors to closest palette colors"""
+    def on_colorize_cie_clicked(self):
+        """Handle Colorize CIE button click - convert all tile colors using CIE Delta E 2000"""
         if not self.canvas_container.canvas.polygons:
             return
         
@@ -2434,10 +2432,10 @@ class MosaicEditor(QMainWindow):
         # Count how many tiles will be processed
         total_tiles = len(self.canvas_container.canvas.colors)
         
-        # Convert each tile color to closest palette color
+        # Convert each tile color to closest palette color using CIE Delta E
         colors_changed = 0
         for i, current_color in enumerate(self.canvas_container.canvas.colors):
-            closest_color = self.find_closest_palette_color(current_color, palette_colors)
+            closest_color = self.find_closest_palette_color_cie(current_color, palette_colors)
             if closest_color != current_color:
                 self.canvas_container.canvas.colors[i] = closest_color
                 colors_changed += 1
@@ -2445,22 +2443,105 @@ class MosaicEditor(QMainWindow):
         # Update the display
         self.canvas_container.canvas.invalidate_cache()
         self.canvas_container.canvas.update()
+        
+        # Show completion message
+        QMessageBox.information(self, "CIE Colorize Complete", 
+                               f"Processed {total_tiles} tiles using CIE Delta E 2000.\n"
+                               f"Changed {colors_changed} colors to match palette.")
     
-    def find_closest_palette_color(self, target_color, palette_colors):
-        """Find the closest color in the palette to the target color"""
+    def on_colorize_hsv_clicked(self):
+        """Handle Colorize HSV button click - convert all tile colors using HSV color space"""
+        if not self.canvas_container.canvas.polygons:
+            return
+        
+        # Get all colors from the palette
+        palette_colors = self.color_palette.colors
+        
+        if not palette_colors:
+            QMessageBox.warning(self, "Warning", "No palette colors available.")
+            return
+        
+        # Count how many tiles will be processed
+        total_tiles = len(self.canvas_container.canvas.colors)
+        
+        # Convert each tile color to closest palette color using HSV distance
+        colors_changed = 0
+        for i, current_color in enumerate(self.canvas_container.canvas.colors):
+            closest_color = self.find_closest_palette_color_hsv(current_color, palette_colors)
+            if closest_color != current_color:
+                self.canvas_container.canvas.colors[i] = closest_color
+                colors_changed += 1
+        
+        # Update the display
+        self.canvas_container.canvas.invalidate_cache()
+        self.canvas_container.canvas.update()
+        
+        # Show completion message
+        QMessageBox.information(self, "HSV Colorize Complete", 
+                               f"Processed {total_tiles} tiles using HSV color space.\n"
+                               f"Changed {colors_changed} colors to match palette.")
+    
+    def find_closest_palette_color_cie(self, target_color, palette_colors):
+        """Find closest color using CIE Delta E 2000 - most perceptually accurate"""
+        try:
+            from colorspacious import cspace_convert, deltaE
+            
+            if not palette_colors:
+                return target_color
+            
+            # Convert target color to LAB color space
+            target_rgb = [target_color.red()/255.0, target_color.green()/255.0, target_color.blue()/255.0]
+            target_lab = cspace_convert(target_rgb, "sRGB1", "CIELab")
+            
+            closest_color = palette_colors[0]
+            min_distance = float('inf')
+            
+            for palette_color in palette_colors:
+                # Convert palette color to LAB
+                palette_rgb = [palette_color.red()/255.0, palette_color.green()/255.0, palette_color.blue()/255.0]
+                palette_lab = cspace_convert(palette_rgb, "sRGB1", "CIELab")
+                
+                # Calculate Delta E 2000 distance
+                distance = deltaE(target_lab, palette_lab, input_space="CIELab")
+                
+                if distance < min_distance:
+                    min_distance = distance
+                    closest_color = palette_color
+            
+            return closest_color
+        except ImportError:
+            # Fallback to RGB Euclidean if colorspacious not available
+            QMessageBox.warning(self, "Warning", 
+                              "CIE Delta E requires 'colorspacious' library.\n"
+                              "Install with: pip install colorspacious\n"
+                              "Falling back to HSV distance.")
+            return self.find_closest_palette_color_hsv(target_color, palette_colors)
+    
+    def find_closest_palette_color_hsv(self, target_color, palette_colors):
+        """Find closest color using HSV color space distance"""
         if not palette_colors:
             return target_color
         
-        # Calculate color distance using RGB values
-        target_r, target_g, target_b = target_color.red(), target_color.green(), target_color.blue()
+        # Convert target to HSV
+        target_hsv = target_color.getHsv()  # Returns (h, s, v, a)
+        target_h, target_s, target_v = target_hsv[0], target_hsv[1], target_hsv[2]
         
         closest_color = palette_colors[0]
         min_distance = float('inf')
         
         for palette_color in palette_colors:
-            # Calculate Euclidean distance in RGB color space
-            p_r, p_g, p_b = palette_color.red(), palette_color.green(), palette_color.blue()
-            distance = ((target_r - p_r) ** 2 + (target_g - p_g) ** 2 + (target_b - p_b) ** 2) ** 0.5
+            palette_hsv = palette_color.getHsv()
+            p_h, p_s, p_v = palette_hsv[0], palette_hsv[1], palette_hsv[2]
+            
+            # Handle hue wraparound (0-360 degrees)
+            hue_diff = abs(target_h - p_h)
+            if hue_diff > 180:
+                hue_diff = 360 - hue_diff
+            
+            # Weighted HSV distance
+            distance = ((hue_diff / 180.0) * 2 + 
+                       abs(target_s - p_s) / 255.0 + 
+                       abs(target_v - p_v) / 255.0) / 3
             
             if distance < min_distance:
                 min_distance = distance
