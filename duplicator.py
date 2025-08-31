@@ -37,6 +37,10 @@ class Canvas(QWidget):
         self.polygon_cursor_size = 10  # Size of the square cursor in pixels
         self.polygons = []  # List of completed polygons
         
+        # Undo system
+        self.undo_stack = []  # Stack of previous polygon states
+        self.max_undo_states = 50  # Maximum number of undo states to keep
+        
         # Zoom and pan variables
         self.zoom_factor = 1.0
         self.pan_offset_x = 0.0
@@ -429,6 +433,9 @@ class Canvas(QWidget):
         if len(self.polygon_points) < 3:
             return
 
+        # Save state before adding new polygons
+        self.save_state()
+
         # Assign group ID for this set of polygons
         current_group_id = self.next_group_id
         self.next_group_id += 1
@@ -515,56 +522,84 @@ class Canvas(QWidget):
     def detect_overlaps(self):
         """Detect all polygon overlaps and store them for visualization, including frame overlaps"""
         from shapely.geometry import Polygon
-        from shapely.errors import TopologicalError
+        from shapely.strtree import STRtree
+        import time
         
+        start_time = time.time()
         self.overlap_data = []
+        
+        if len(self.polygons) < 2:
+            return
         
         # Buffer amount is half the edge width to account for frame thickness
         buffer_amount = self.edge_width / 2.0
         
-        # Check all pairs of polygons
-        for i in range(len(self.polygons)):
-            for j in range(i + 1, len(self.polygons)):
+        # Create valid shapely polygons with original indices
+        valid_polygons = []
+        original_indices = []
+        
+        for i, polygon_data in enumerate(self.polygons):
+            try:
+                poly_points = polygon_data['points']
+                if len(poly_points) < 3:
+                    continue
+                    
+                poly = Polygon(poly_points)
+                if poly.is_valid:
+                    # Buffer polygon to account for frame thickness
+                    poly_buffered = poly.buffer(buffer_amount)
+                    valid_polygons.append(poly_buffered)
+                    original_indices.append(i)
+            except Exception:
+                continue
+        
+        if len(valid_polygons) < 2:
+            return
+        
+        # Create spatial index (R-tree) for efficient overlap detection
+        tree = STRtree(valid_polygons)
+        
+        processed_pairs = set()
+        
+        # Use spatial index for efficient overlap detection
+        for i_valid, poly1_buffered in enumerate(valid_polygons):
+            # Query spatial index for potential overlaps
+            possible_matches = tree.query(poly1_buffered)
+            
+            for j_valid in possible_matches:
+                if i_valid == j_valid:
+                    continue
+                
+                # Get original polygon indices
+                i_original = original_indices[i_valid]
+                j_original = original_indices[j_valid]
+                
+                # Avoid duplicate checks
+                pair = tuple(sorted((i_original, j_original)))
+                if pair in processed_pairs:
+                    continue
+                
+                processed_pairs.add(pair)
+                
                 try:
-                    # Create shapely polygons
-                    poly1_points = self.polygons[i]['points']
-                    poly2_points = self.polygons[j]['points']
+                    poly2_buffered = valid_polygons[j_valid]
                     
-                    # Skip if not enough points
-                    if len(poly1_points) < 3 or len(poly2_points) < 3:
-                        continue
-                        
-                    poly1 = Polygon(poly1_points)
-                    poly2 = Polygon(poly2_points)
-                    
-                    # Check if polygons are valid
-                    if not poly1.is_valid or not poly2.is_valid:
-                        continue
-                    
-                    # Buffer polygons to account for frame thickness
-                    poly1_buffered = poly1.buffer(buffer_amount)
-                    poly2_buffered = poly2.buffer(buffer_amount)
-                    
-                    # Check for intersection of buffered polygons (includes frame overlap)
+                    # Check for actual intersection (simplified - just like mosaic editor)
                     if poly1_buffered.intersects(poly2_buffered):
                         intersection = poly1_buffered.intersection(poly2_buffered)
                         
-                        # Only consider significant overlaps (not just edge touches)
-                        if intersection.area > 1.0:  # Minimum overlap area threshold
-                            # Convert intersection back to points list
-                            if intersection.geom_type == 'Polygon':
-                                overlap_points = list(intersection.exterior.coords[:-1])  # Remove duplicate last point
-                                self.overlap_data.append((i, j, overlap_points))
-                            elif intersection.geom_type == 'MultiPolygon':
-                                # Handle multiple overlap areas
-                                for geom in intersection.geoms:
-                                    if geom.geom_type == 'Polygon' and geom.area > 1.0:
-                                        overlap_points = list(geom.exterior.coords[:-1])
-                                        self.overlap_data.append((i, j, overlap_points))
+                        # Only consider significant overlaps (simplified check)
+                        if hasattr(intersection, 'area') and intersection.area > 0.01:
+                            # Store simple overlap data (no complex geometry)
+                            self.overlap_data.append((i_original, j_original, []))
                                         
-                except (TopologicalError, Exception) as e:
+                except Exception:
                     # Skip problematic polygon pairs
                     continue
+        
+        end_time = time.time()
+        print(f"Overlap detection completed in {end_time - start_time:.2f} seconds")
+        print(f"Found {len(self.overlap_data)} overlapping pairs")
     
     def polygons_overlap_simple(self, points1, points2):
         """Simple overlap detection using point-in-polygon tests (fallback method)"""
@@ -588,6 +623,9 @@ class Canvas(QWidget):
             self.detect_overlaps()
             if not self.overlap_data:
                 return  # No overlaps found
+        
+        # Save state before making changes
+        self.save_state()
         
         # Collect indices of polygons to delete (older ones in overlaps)
         to_delete = set()
@@ -616,6 +654,9 @@ class Canvas(QWidget):
             if not self.overlap_data:
                 return  # No overlaps found
         
+        # Save state before making changes
+        self.save_state()
+        
         # Collect indices of polygons to delete (newer ones in overlaps)
         to_delete = set()
         for i, j, overlap_points in self.overlap_data:
@@ -634,6 +675,39 @@ class Canvas(QWidget):
         # Update display
         self.update()
         print(f"Deleted {len(to_delete)} red (newer) overlapping polygons")
+    
+    def save_state(self):
+        """Save the current polygon state to the undo stack"""
+        import copy
+        
+        # Create a deep copy of the current polygons list
+        current_state = copy.deepcopy(self.polygons)
+        
+        # Add to undo stack
+        self.undo_stack.append(current_state)
+        
+        # Limit the size of the undo stack
+        if len(self.undo_stack) > self.max_undo_states:
+            self.undo_stack.pop(0)  # Remove oldest state
+    
+    def undo_last_action(self):
+        """Undo the last action by restoring the previous polygon state"""
+        if not self.undo_stack:
+            print("No actions to undo")
+            return False
+        
+        # Restore the last saved state
+        previous_state = self.undo_stack.pop()
+        self.polygons = previous_state
+        
+        # Clear overlap data since polygons have changed
+        self.overlap_data = []
+        self.showing_overlaps = False
+        
+        # Update display
+        self.update()
+        print(f"Undid last action. {len(self.undo_stack)} undo states remaining.")
+        return True
     
     def mousePressEvent(self, event):
         """Handle mouse press events"""
@@ -900,6 +974,9 @@ class Canvas(QWidget):
         """Create trapezoid polygons along the drawn line and parallel lines on both sides"""
         if len(self.line_points) < 2:
             return
+        
+        # Save state before creating line polygons
+        self.save_state()
             
         # Create smooth spline from the original line points
         smooth_points, spline_data = self.create_smooth_spline(self.line_points)
@@ -1281,6 +1358,9 @@ class Canvas(QWidget):
         for i, polygon_data in enumerate(self.polygons):
             points = polygon_data['points']
             if self.point_in_polygon(world_x, world_y, points):
+                # Save state before erasing
+                self.save_state()
+                
                 # Get group ID of the polygon to erase
                 group_id = polygon_data.get('group_id')
                 
@@ -1663,6 +1743,12 @@ class SidePanel(QFrame):
             delete_red_button.clicked.connect(self.canvas.delete_red_polygons)
             layout.addWidget(delete_red_button)
             
+            # Add undo button
+            undo_button = QPushButton("Undo")
+            undo_button.setToolTip("Undo the last action")
+            undo_button.clicked.connect(self.canvas.undo_last_action)
+            layout.addWidget(undo_button)
+            
             # Add stretch to push save/load buttons to bottom
             layout.addStretch()
             
@@ -1695,6 +1781,11 @@ class SidePanel(QFrame):
             self.duplicate_checkbox = QCheckBox("Duplicate")
             self.duplicate_checkbox.toggled.connect(self.on_duplicate_toggled)
             layout.addWidget(self.duplicate_checkbox)
+            
+            # Add duplicate button
+            duplicate_button = QPushButton("Duplicate")
+            duplicate_button.clicked.connect(self.duplicate_all_polygons)
+            layout.addWidget(duplicate_button)
             
             # Add line mode checkbox
             self.line_checkbox = QCheckBox("Line")
@@ -1830,6 +1921,53 @@ class SidePanel(QFrame):
         """Handle duplicate mode checkbox toggle"""
         if self.canvas:
             self.canvas.duplicate_mode = checked
+    
+    def duplicate_all_polygons(self):
+        """Create 8 copies of all existing polygons using duplicate offsets"""
+        if not self.canvas:
+            return
+        
+        # Get all existing polygons
+        original_polygons = self.canvas.polygons[:]  # Make a copy of the current polygons
+        
+        if not original_polygons:
+            return  # Nothing to duplicate
+        
+        # Use the same box_size as in duplicate mode
+        box_size = self.canvas.grid_size
+        
+        # Define the 8 offsets and corresponding frame colors (same as in duplicate mode)
+        offsets_and_colors = [
+            ((-box_size, -box_size), QColor(255, 0, 0, 255)),    # 1st copy - Red frame
+            ((-box_size, 0), QColor(0, 0, 255, 255)),            # 2nd copy - Blue frame
+            ((-box_size, box_size), QColor(144, 238, 144, 255)), # 3rd copy - Light green frame
+            ((0, -box_size), QColor(128, 0, 128, 255)),          # 4th copy - Purple frame
+            ((0, box_size), QColor(255, 255, 0, 255)),           # 5th copy - Yellow frame
+            ((box_size, -box_size), QColor(255, 192, 203, 255)), # 6th copy - Pink frame
+            ((box_size, 0), QColor(128, 128, 128, 255)),         # 7th copy - Gray frame
+            ((box_size, box_size), QColor(173, 216, 230, 255))   # 8th copy - Light blue frame
+        ]
+        
+        # Create duplicates for each original polygon
+        for original_polygon in original_polygons:
+            for (offset_x, offset_y), frame_color in offsets_and_colors:
+                duplicate_points = []
+                for point in original_polygon['points']:
+                    new_x = point[0] + offset_x
+                    new_y = point[1] + offset_y
+                    duplicate_points.append((new_x, new_y))
+                
+                duplicate_polygon = {
+                    'points': duplicate_points,
+                    'color': QColor(0, 0, 0, 0),  # Transparent fill
+                    'frame_color': frame_color,   # Colored frame
+                    'group_id': None  # No group ID for manually duplicated polygons
+                }
+                
+                self.canvas.polygons.append(duplicate_polygon)
+        
+        # Update the display
+        self.canvas.update()
     
     def on_line_toggled(self, checked):
         """Handle line mode checkbox toggle"""
