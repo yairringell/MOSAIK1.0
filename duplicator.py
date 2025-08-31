@@ -1138,10 +1138,48 @@ class Canvas(QWidget):
                 'points': randomized_polygon_points,
                 'color': QColor(0, 0, 0, 0),  # Transparent fill
                 'frame_color': QColor(0, 0, 0, 255),  # Black frame
-                'group_id': None  # Line polygons are not grouped
+                'group_id': None  # Line polygons are not grouped by default
             }
             
+            # Add original polygon
             self.polygons.append(polygon_data)
+            
+            # If duplicate mode is enabled, create 8 copies with offsets and colored frames
+            if self.duplicate_mode:
+                box_size = self.grid_size
+                
+                # Generate unique group ID for this polygon and its copies
+                current_group_id = max([p.get('group_id', 0) for p in self.polygons if p.get('group_id') is not None] + [0]) + 1
+                polygon_data['group_id'] = current_group_id  # Update original with group ID
+                
+                # Define the 8 offsets and corresponding frame colors
+                offsets_and_colors = [
+                    ((-box_size, -box_size), QColor(255, 0, 0, 255)),    # 1st copy - Red frame
+                    ((-box_size, 0), QColor(0, 0, 255, 255)),            # 2nd copy - Blue frame
+                    ((-box_size, box_size), QColor(144, 238, 144, 255)), # 3rd copy - Light green frame
+                    ((0, -box_size), QColor(128, 0, 128, 255)),          # 4th copy - Purple frame
+                    ((0, box_size), QColor(255, 255, 0, 255)),           # 5th copy - Yellow frame
+                    ((box_size, -box_size), QColor(255, 192, 203, 255)), # 6th copy - Pink frame
+                    ((box_size, 0), QColor(128, 128, 128, 255)),         # 7th copy - Gray frame
+                    ((box_size, box_size), QColor(173, 216, 230, 255))   # 8th copy - Light blue frame
+                ]
+                
+                # Create each duplicate with same group ID
+                for (offset_x, offset_y), frame_color in offsets_and_colors:
+                    duplicate_points = []
+                    for point in randomized_polygon_points:
+                        new_x = point[0] + offset_x
+                        new_y = point[1] + offset_y
+                        duplicate_points.append((new_x, new_y))
+                    
+                    duplicate_polygon = {
+                        'points': duplicate_points,
+                        'color': QColor(0, 0, 0, 0),  # Transparent fill
+                        'frame_color': frame_color,   # Colored frame
+                        'group_id': current_group_id  # Same group ID as original
+                    }
+                    
+                    self.polygons.append(duplicate_polygon)
     
     def create_offset_line(self, smooth_points, spline_data, offset_distance):
         """Create an offset line parallel to the original line at the given distance"""
@@ -1188,7 +1226,7 @@ class Canvas(QWidget):
     
     def update_group_control_points_after_drag(self, group_id):
         """Update control points of all copies in the group based on the original polygon's new position"""
-        if not self.duplicate_mode or group_id is None:
+        if group_id is None:
             return
             
         # Find the original polygon and all copies in the group
@@ -1268,15 +1306,33 @@ class Canvas(QWidget):
     def keyPressEvent(self, event):
         """Handle key press events"""
         if event.key() == Qt.Key_Escape:
-            # Escape key releases polygon mode
+            # Escape key exits all modes except duplicate mode
+            modes_changed = False
+            
             if self.polygon_mode:
                 self.polygon_mode = False
                 self.polygon_points = []  # Clear any in-progress polygon
                 self.setCursor(Qt.ArrowCursor)
                 self.cursor_timer.stop()
+                modes_changed = True
+                
+            if self.eraser_mode:
+                self.set_eraser_mode(False)
+                modes_changed = True
+                
+            if self.line_mode:
+                self.set_line_mode(False)
+                # Clear any in-progress line drawing
+                self.is_drawing_line = False
+                self.current_line_end = None
+                self.line_start_point = None
+                self.line_points = []
+                modes_changed = True
+                
+            if modes_changed:
                 self.update()
                 
-                # Find and update the checkbox - look for it in the widget hierarchy
+                # Find and update the checkboxes - look for them in the widget hierarchy
                 parent = self.parent()
                 while parent:
                     # Look for SidePanel widgets in the parent's children
@@ -1286,7 +1342,14 @@ class Canvas(QWidget):
                             child.blockSignals(True)
                             child.setChecked(False)
                             child.blockSignals(False)
-                            break
+                        elif child.text() == "Eraser Mode" and hasattr(child, 'setChecked'):
+                            child.blockSignals(True)
+                            child.setChecked(False)
+                            child.blockSignals(False)
+                        elif child.text() == "Line" and hasattr(child, 'setChecked'):
+                            child.blockSignals(True)
+                            child.setChecked(False)
+                            child.blockSignals(False)
                     parent = parent.parent()
                     
         elif event.key() == Qt.Key_P:
@@ -1325,7 +1388,7 @@ class Canvas(QWidget):
                     
         elif event.key() == Qt.Key_Delete:
             # Delete key removes selected polygon(s)
-            if self.selected_polygon_indices:
+            if self.selected_polygon_index >= 0:
                 self.delete_selected_polygon()
         else:
             super().keyPressEvent(event)
@@ -1335,12 +1398,15 @@ class Canvas(QWidget):
         if self.selected_polygon_index < 0:
             return
         
+        # Save state before deleting
+        self.save_state()
+        
         # Get the selected polygon and its group ID
         if 0 <= self.selected_polygon_index < len(self.polygons):
             selected_polygon = self.polygons[self.selected_polygon_index]
             group_id = selected_polygon.get('group_id')
             
-            # Only apply group behavior if duplicate mode is currently enabled
+            # If duplicate mode is enabled and polygon has a group ID, remove all polygons with the same group ID
             if self.duplicate_mode and group_id is not None:
                 # Remove all polygons with the same group ID
                 self.polygons = [p for p in self.polygons if p.get('group_id') != group_id]
