@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mosaic Canvas</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/paper.js/0.12.17/paper-full.min.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: Arial, sans-serif;
+            height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            background-color: #f0f0f0;
+            margin: 0;
+            padding: 20px;
+            position: relative;
+        }
+
+        .canvas-container {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            background-color: #ffffff;
+            position: relative;
+        }
+
+        .left-controls {
+            position: absolute;
+            left: -200px;
+            top: 50%;
+            transform: translateY(-50%);
+            width: 180px;
+            z-index: 10;
+        }
+
+        .right-controls {
+            position: absolute;
+            right: -300px;
+            top: 50%;
+            transform: translateY(-50%);
+            width: 280px;
+            z-index: 10;
+        }
+
+        .load-csv-btn {
+            background-color: #007bff;
+            color: white;
+            border: none;
+            padding: 12px 20px;
+            font-size: 16px;
+            cursor: pointer;
+            border-radius: 5px;
+            margin-bottom: 15px;
+            width: 100%;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.2);
+        }
+
+        .load-csv-btn:hover {
+            background-color: #0056b3;
+        }
+
+        .file-info {
+            background-color: white;
+            padding: 10px;
+            border-radius: 5px;
+            font-size: 14px;
+            color: #333;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+            text-align: center;
+        }
+
+        #canvas {
+            border: 2px solid #ccc;
+            cursor: crosshair;
+            background-color: #404040;
+        }
+
+        .load-csv-btn {
+            background-color: #007bff;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            font-size: 16px;
+            cursor: pointer;
+            border-radius: 5px;
+            margin-bottom: 20px;
+            width: 100%;
+        }
+
+        .load-csv-btn:hover {
+            background-color: #0056b3;
+        }
+
+        .file-info {
+            margin-top: 10px;
+            font-size: 14px;
+            color: #ccc;
+        }
+
+        #fileInput {
+            display: none;
+        }
+
+        .debug-window {
+            background-color: #333;
+            border-radius: 5px;
+            padding: 15px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.3);
+        }
+
+        .debug-window h3 {
+            color: #ccc;
+            margin: 0 0 10px 0;
+            font-size: 16px;
+        }
+
+        .debug-text {
+            background-color: #222;
+            color: #0f0;
+            font-family: 'Courier New', monospace;
+            font-size: 11px;
+            padding: 10px;
+            border-radius: 3px;
+            height: 200px;
+            overflow-y: auto;
+            white-space: pre-wrap;
+            border: 1px solid #555;
+        }
+
+        .debug-clear {
+            background-color: #666;
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            font-size: 12px;
+            cursor: pointer;
+            border-radius: 3px;
+            margin-top: 8px;
+            width: 100%;
+        }
+
+        .debug-clear:hover {
+            background-color: #777;
+        }
+    </style>
+</head>
+<body>
+    <div class="canvas-container">
+        <div class="left-controls">
+            <button class="load-csv-btn" onclick="document.getElementById('fileInput').click()">Load CSV</button>
+            <input type="file" id="fileInput" accept=".csv" onchange="loadCSV(event)">
+            <div class="file-info" id="fileInfo">No file loaded</div>
+        </div>
+        
+        <canvas id="canvas" width="800" height="600"></canvas>
+        
+        <div class="right-controls">
+            <div class="debug-window">
+                <h3>Debug Log</h3>
+                <div class="debug-text" id="debugLog">Ready to load CSV file...</div>
+                <button class="debug-clear" onclick="clearDebug()">Clear Log</button>
+            </div>
+        </div>
+    </div>
+
+    <script type="text/paperscript" canvas="canvas">
+        var polygonPaths = [];
+        var showEdges = false; // Changed to false by default
+        var bounds = null;
+
+        // Set canvas background to dark gray
+        project.view.element.style.backgroundColor = '#404040';
+
+        // Make functions globally available
+        window.paperFunctions = {
+            clearPolygons: function() {
+                project.activeLayer.removeChildren();
+                polygonPaths = [];
+            },
+            
+            createPolygon: function(coords, r, g, b) {
+                try {
+                    var path = new Path();
+                    for (var j = 0; j < coords.length; j++) {
+                        path.add(new Point(coords[j][0], coords[j][1]));
+                    }
+                    path.closed = true;
+                    path.fillColor = new Color(r/255, g/255, b/255);
+                    // Remove stroke by default (no edges)
+                    if (showEdges) {
+                        path.strokeColor = 'black';
+                        path.strokeWidth = 0.5;
+                    }
+                    polygonPaths.push(path);
+                    return true;
+                } catch (error) {
+                    return false;
+                }
+            }
+        };
+
+        // Mouse wheel zoom
+        view.onMouseWheel = function(event) {
+            var oldZoom = view.zoom;
+            var newZoom = event.delta < 0 ? oldZoom * 1.05 : oldZoom * 0.95;
+            newZoom = Math.max(0.05, Math.min(20, newZoom));
+            
+            var beta = oldZoom / newZoom;
+            var mousePosition = view.viewToProject(event.point);
+            var viewCenter = view.center;
+            var offset = mousePosition.subtract(viewCenter);
+            var newCenter = mousePosition.subtract(offset.multiply(beta));
+            
+            view.zoom = newZoom;
+            view.center = newCenter;
+        };
+
+        // Mouse drag for panning
+        function onMouseDrag(event) {
+            view.center = view.center.subtract(event.delta);
+        }
+
+        // Set initial view with top-left corner at (0,0)
+        view.center = new Point(view.size.width / 2, view.size.height / 2);
+        view.zoom = 1; // Original size, no scaling
+
+        // Initialize with instruction text (light gray for dark background)
+        var text = new PointText({
+            point: view.center,
+            content: 'Load a CSV file to view polygons',
+            fontSize: 18,
+            fillColor: '#cccccc',
+            justification: 'center'
+        });
+    </script>
+
+    <script src="mosaic-canvas.js"></script>
+</body>
+</html>

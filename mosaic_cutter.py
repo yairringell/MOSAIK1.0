@@ -1040,6 +1040,7 @@ class ControlPanel(QWidget):
                     boxes_data[box_label] = {
                         'polygons': [],
                         'colors': [],
+                        'original_colors': [],  # Store original colors separately
                         'box_index': box_index
                     }
             
@@ -1059,6 +1060,15 @@ class ControlPanel(QWidget):
                     if box_label in boxes_data:
                         boxes_data[box_label]['polygons'].append(polygon)
                         boxes_data[box_label]['colors'].append(self.canvas.colors[i])
+                        
+                        # Get original color for this polygon
+                        original_color = self.canvas.colors[i]  # Default to current color
+                        if (hasattr(self.canvas, 'original_colors') and 
+                            i < len(self.canvas.original_colors)):
+                            original_color = self.canvas.original_colors[i]
+                        
+                        boxes_data[box_label]['original_colors'].append(original_color)
+                        
                         # Store the original polygon index to retrieve original color later
                         if 'original_indices' not in boxes_data[box_label]:
                             boxes_data[box_label]['original_indices'] = []
@@ -1069,6 +1079,13 @@ class ControlPanel(QWidget):
             dxf_files_saved = 0
             for box_label, data in boxes_data.items():
                 if data['polygons']:
+                    # Calculate box top-left coordinates for coordinate transformation
+                    box_index = data['box_index']
+                    row = box_index // 6
+                    col = box_index % 6
+                    box_offset_x = grid_x + col * cell_size
+                    box_offset_y = grid_y + row * cell_size
+                    
                     # Create box directory directly in selected folder
                     box_dir = os.path.join(box_tiles_dir, box_label)
                     if not os.path.exists(box_dir):
@@ -1081,27 +1098,23 @@ class ControlPanel(QWidget):
                             polygon = self.apply_fillet_to_polygon(polygon, fillet_radius)
                         processed_polygons.append(polygon)
                     
-                    # Save box CSV file (with filleted polygons if requested)
+                    # Save box CSV file (with filleted polygons, ORIGINAL colors, and transformed coordinates)
                     csv_filename = os.path.join(box_dir, f"box_{box_label}.csv")
-                    self.save_box_csv(csv_filename, processed_polygons, data['colors'])
+                    self.save_box_csv(csv_filename, processed_polygons, data['original_colors'], box_offset_x, box_offset_y)
                     saved_files.append(csv_filename)
                     
-                    # Prepare polygon data for DXF export (using filleted polygons)
+                    # Prepare polygon data for DXF export (using filleted polygons and ORIGINAL colors)
                     polygons_data = []
-                    for i, (polygon, color) in enumerate(zip(processed_polygons, data['colors'])):
-                        # Use original color for DXF files (before Cut operation)
-                        original_color = color  # Default to current color
-                        if ('original_indices' in data and i < len(data['original_indices']) and 
-                            hasattr(self.canvas, 'original_colors') and len(self.canvas.original_colors) > 0):
-                            # Use the stored original index to get the correct original color
-                            original_index = data['original_indices'][i]
-                            if original_index < len(self.canvas.original_colors):
-                                original_color = self.canvas.original_colors[original_index]
+                    for i, polygon in enumerate(processed_polygons):
+                        # Use original color for both display and DXF files
+                        original_color = data['colors'][i]  # Default to current Cut color
+                        if i < len(data['original_colors']):
+                            original_color = data['original_colors'][i]  # Use stored original color
                         
                         polygons_data.append({
                             'polygon': polygon,
-                            'color': color,  # Current color (from Cut operation)
-                            'original_color': original_color,  # Original color for DXF
+                            'color': original_color,  # Use original color
+                            'original_color': original_color,  # Same for DXF
                             'original_index': i
                         })
                     
@@ -1260,17 +1273,11 @@ class ControlPanel(QWidget):
                 # Write all polygons from all boxes
                 global_polygon_id = 0
                 for box_label, data in boxes_data.items():
-                    for i, (polygon, color) in enumerate(zip(data['polygons'], data['colors'])):
+                    for i, polygon in enumerate(data['polygons']):
                         # Use original color for CSV files (before Cut operation)
-                        original_color = color  # Default to current color
-                        if hasattr(self.canvas, 'original_colors') and len(self.canvas.original_colors) > 0:
-                            # Find the original index of this polygon in the full list
-                            try:
-                                original_index = self.canvas.polygons.index(polygon)
-                                if original_index < len(self.canvas.original_colors):
-                                    original_color = self.canvas.original_colors[original_index]
-                            except (ValueError, IndexError):
-                                pass  # Use current color as fallback
+                        original_color = data['colors'][i]  # Default to current color
+                        if i < len(data['original_colors']):
+                            original_color = data['original_colors'][i]  # Use stored original color
                         
                         # Calculate area
                         poly_area = polygon.area
@@ -1333,8 +1340,8 @@ class ControlPanel(QWidget):
             print(f"Error applying fillet to polygon: {e}")
             return polygon
     
-    def save_box_csv(self, filename, polygons, colors):
-        """Save polygons and colors to a CSV file"""
+    def save_box_csv(self, filename, polygons, colors, offset_x=0, offset_y=0):
+        """Save polygons and colors to a CSV file with coordinate transformation"""
         import csv
         
         with open(filename, 'w', newline='') as csvfile:
@@ -1360,9 +1367,17 @@ class ControlPanel(QWidget):
                     if not hasattr(sub_poly, 'exterior'):
                         continue  # Skip invalid geometries
                         
-                    # Convert polygon coordinates to list format
+                    # Get coordinates and apply transformation
                     coords = list(sub_poly.exterior.coords[:-1])  # Remove duplicate last point
-                    coord_str = str(coords)
+                    
+                    # Transform coordinates by subtracting the box offset
+                    transformed_coords = []
+                    for x, y in coords:
+                        new_x = x - offset_x
+                        new_y = y - offset_y
+                        transformed_coords.append((new_x, new_y))
+                    
+                    coord_str = str(transformed_coords)
                     
                     # Normalize color values to 0-1 range
                     r = color.red() / 255.0

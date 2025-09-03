@@ -299,8 +299,8 @@ class Canvas(QWidget):
                 # Use original size
                 self.background_image = original_pixmap
             
-            # Center the grid on the loaded image
-            self.center_grid_on_image()
+            # Center the image in the middle of the grid
+            self.center_image_on_grid()
             
             self.update()  # Trigger repaint
             return True
@@ -308,26 +308,28 @@ class Canvas(QWidget):
             print(f"Error loading image: {e}")
             return False
     
-    def center_grid_on_image(self):
-        """Center the 3x3 grid on the loaded image"""
+    def center_image_on_grid(self):
+        """Center the image in the middle of the grid"""
         if not self.background_image or self.background_image.isNull():
             return
+        
+        # Reset grid position to origin (0,0)
+        self.grid_offset_x = 0
+        self.grid_offset_y = 0
         
         # Get image dimensions
         image_width = self.background_image.width()
         image_height = self.background_image.height()
         
-        # Calculate the total grid size (3 cells * cell size)
-        total_grid_size = self.grid_size * 3
+        # Calculate the center of the grid (3x3 grid starting at 0,0)
+        # Grid center is at (1.5 * grid_size, 1.5 * grid_size)
+        grid_center_x = self.grid_size * 1.5
+        grid_center_y = self.grid_size * 1.5
         
-        # Calculate the center position of the image
-        image_center_x = image_width / 2
-        image_center_y = image_height / 2
-        
-        # Calculate grid offset to center it on the image
-        # The grid offset is the top-left corner of the grid
-        self.grid_offset_x = image_center_x - (total_grid_size / 2)
-        self.grid_offset_y = image_center_y - (total_grid_size / 2)
+        # Calculate image offset to center the image on the grid center
+        # Image offset is the top-left corner of the image
+        self.image_offset_x = grid_center_x - (image_width / 2)
+        self.image_offset_y = grid_center_y - (image_height / 2)
     
     def scale_background_image(self, x_scale_factor, y_scale_factor=None):
         """Scale the background image by the given factors (1.0 = 100%)"""
@@ -355,8 +357,8 @@ class Canvas(QWidget):
             Qt.SmoothTransformation
         )
         
-        # Re-center the grid on the scaled image
-        self.center_grid_on_image()
+        # Re-center the image on the grid after scaling
+        self.center_image_on_grid()
         
         # Trigger repaint
         self.update()
@@ -436,9 +438,10 @@ class Canvas(QWidget):
         # Save state before adding new polygons
         self.save_state()
 
-        # Assign group ID for this set of polygons
-        current_group_id = self.next_group_id
-        self.next_group_id += 1
+        # Generate unique group ID for this polygon and its copies (same method as line mode)
+        current_group_id = max([p.get('group_id', 0) for p in self.polygons if p.get('group_id') is not None] + [0]) + 1
+        
+        print(f"DEBUG: Creating polygon mode polygon with group_id={current_group_id}")
 
         # Create original polygon with transparent fill and black frame
         original_polygon = {
@@ -869,6 +872,11 @@ class Canvas(QWidget):
                     self.setCursor(Qt.ArrowCursor)
                 elif self.eraser_mode and not self.polygon_mode:
                     self.setCursor(Qt.PointingHandCursor)
+        
+        # Update cursor position in right panel (for all mouse moves)
+        if hasattr(self, 'right_panel') and self.right_panel:
+            world_x, world_y = self.screen_to_world(event.x(), event.y())
+            self.right_panel.update_cursor_position(world_x, world_y)
     
     def mouseReleaseEvent(self, event):
         """Handle mouse release events"""
@@ -884,13 +892,14 @@ class Canvas(QWidget):
             # Stop erasing
             self.is_erasing = False
         elif self.is_dragging_control_point:
-            # Update all copies when control point dragging is complete
+            # Update all copies when control point dragging is complete (only if duplicate mode is active)
             if (self.duplicate_mode and self.selected_polygon_index >= 0 and 
                 self.selected_polygon_index < len(self.polygons)):
                 
                 selected_polygon = self.polygons[self.selected_polygon_index]
                 group_id = selected_polygon.get('group_id')
                 
+                # Synchronize group polygons only when duplicate mode is enabled
                 if group_id is not None:
                     self.update_group_control_points_after_drag(group_id)
             
@@ -1152,6 +1161,8 @@ class Canvas(QWidget):
                 current_group_id = max([p.get('group_id', 0) for p in self.polygons if p.get('group_id') is not None] + [0]) + 1
                 polygon_data['group_id'] = current_group_id  # Update original with group ID
                 
+                print(f"DEBUG: Creating line mode polygon with group_id={current_group_id}")
+                
                 # Define the 8 offsets and corresponding frame colors
                 offsets_and_colors = [
                     ((-box_size, -box_size), QColor(255, 0, 0, 255)),    # 1st copy - Red frame
@@ -1226,12 +1237,30 @@ class Canvas(QWidget):
     
     def update_group_control_points_after_drag(self, group_id):
         """Update control points of all copies in the group based on the original polygon's new position"""
-        if group_id is None:
+        if group_id is None or self.selected_polygon_index < 0:
             return
             
-        # Find the original polygon and all copies in the group
+        print(f"DEBUG: Control point sync called - group_id={group_id}, selected_index={self.selected_polygon_index}, total_polygons={len(self.polygons)}")
+            
+        # Find all polygons in the group
         group_polygons = [p for p in self.polygons if p.get('group_id') == group_id]
-        if len(group_polygons) < 2:  # Need at least original + 1 copy
+        if len(group_polygons) < 2:  # Need at least 2 polygons to synchronize
+            return
+            
+        # Get the dragged polygon (the one we just moved)
+        if self.selected_polygon_index >= len(self.polygons):
+            print(f"DEBUG: ERROR - selected_polygon_index {self.selected_polygon_index} >= total polygons {len(self.polygons)}")
+            return
+        dragged_polygon = self.polygons[self.selected_polygon_index]
+        
+        print(f"DEBUG: Dragged polygon group_id={dragged_polygon.get('group_id')}, expected group_id={group_id}")
+        
+        # CRITICAL CHECK: Verify the dragged polygon is actually in the group we expect
+        if dragged_polygon.get('group_id') != group_id:
+            print(f"DEBUG: ERROR - Dragged polygon is in wrong group! Expected {group_id}, got {dragged_polygon.get('group_id')}")
+            return
+        
+        if self.selected_control_point < 0 or self.selected_control_point >= len(dragged_polygon['points']):
             return
             
         # Find the original polygon (the one with black frame)
@@ -1243,17 +1272,48 @@ class Canvas(QWidget):
                 original_polygon = polygon
                 break
                 
-        if not original_polygon or self.selected_control_point < 0:
+        if not original_polygon:
             return
+        
+        # Define the box size (needed for offset calculations)
+        box_size = self.grid_size
             
-        # Get the new position of the moved control point from the original
-        if self.selected_control_point >= len(original_polygon['points']):
-            return
+        # Get the new position of the moved control point from whichever polygon was dragged
+        dragged_new_point = dragged_polygon['points'][self.selected_control_point]
+        
+        # Calculate where the original should be based on the dragged polygon's position
+        if dragged_polygon is original_polygon:
+            # If we dragged the original, use its position directly
+            original_new_point = dragged_new_point
+        else:
+            # If we dragged a copy, calculate where the original should be
+            # Find which copy this is by its frame color
+            dragged_frame_color = dragged_polygon.get('frame_color', QColor(0, 0, 0, 255))
             
-        original_new_point = original_polygon['points'][self.selected_control_point]
+            # Map frame colors to their corresponding offsets
+            color_to_offset = {
+                (255, 0, 0): (-box_size, -box_size),     # Red
+                (0, 0, 255): (-box_size, 0),             # Blue  
+                (144, 238, 144): (-box_size, box_size),  # Light green
+                (128, 0, 128): (0, -box_size),           # Purple
+                (255, 255, 0): (0, box_size),            # Yellow
+                (255, 192, 203): (box_size, -box_size),  # Pink
+                (128, 128, 128): (box_size, 0),          # Gray
+                (173, 216, 230): (box_size, box_size)    # Light blue
+            }
+            
+            color_key = (dragged_frame_color.red(), dragged_frame_color.green(), dragged_frame_color.blue())
+            dragged_offset = color_to_offset.get(color_key, (0, 0))
+            
+            # Calculate where original should be: dragged_position - dragged_offset = original_position
+            original_new_point = (dragged_new_point[0] - dragged_offset[0], 
+                                 dragged_new_point[1] - dragged_offset[1])
+            
+            # Update the original polygon's control point too
+            if self.selected_control_point < len(original_polygon['points']):
+                original_polygon['points'][self.selected_control_point] = original_new_point
         
         # Define the same offsets used during creation
-        box_size = self.grid_size
         offsets = [
             (-box_size, -box_size),  # 1st copy - Red frame
             (-box_size, 0),          # 2nd copy - Blue frame
@@ -1395,27 +1455,39 @@ class Canvas(QWidget):
     
     def delete_selected_polygon(self):
         """Delete the currently selected polygon and optionally all polygons in its group"""
-        if self.selected_polygon_index < 0:
+        if self.selected_polygon_index < 0 or self.selected_polygon_index >= len(self.polygons):
             return
         
         # Save state before deleting
         self.save_state()
         
         # Get the selected polygon and its group ID
-        if 0 <= self.selected_polygon_index < len(self.polygons):
-            selected_polygon = self.polygons[self.selected_polygon_index]
-            group_id = selected_polygon.get('group_id')
-            
-            # If duplicate mode is enabled and polygon has a group ID, remove all polygons with the same group ID
-            if self.duplicate_mode and group_id is not None:
-                # Remove all polygons with the same group ID
-                self.polygons = [p for p in self.polygons if p.get('group_id') != group_id]
-            else:
-                # If duplicate mode is off or no group ID, just remove the single polygon
-                self.polygons.pop(self.selected_polygon_index)
+        selected_polygon = self.polygons[self.selected_polygon_index]
+        group_id = selected_polygon.get('group_id')
         
-        # Clear selection
+        # If duplicate mode is enabled and polygon has a group ID, remove all polygons with the same group ID
+        if self.duplicate_mode and group_id is not None:
+            # Count how many polygons will be removed and track indices
+            polygons_to_remove = []
+            for i, p in enumerate(self.polygons):
+                if p.get('group_id') == group_id:
+                    polygons_to_remove.append(i)
+            
+            # Remove polygons in reverse order to avoid index shifting issues
+            for i in reversed(sorted(polygons_to_remove)):
+                if i < len(self.polygons):
+                    self.polygons.pop(i)
+        else:
+            # If duplicate mode is off or no group ID, just remove the single polygon
+            self.polygons.pop(self.selected_polygon_index)
+        
+        # Clear overlap data since polygon indices may have changed
+        self.overlap_data = []
+        self.showing_overlaps = False
+        
+        # Reset selection to avoid invalid index
         self.selected_polygon_index = -1
+        self.selected_control_point = -1
         self.update()
     
     def erase_polygon_at_point(self, world_x, world_y):
@@ -1432,11 +1504,30 @@ class Canvas(QWidget):
                 
                 # Only apply group behavior if duplicate mode is currently enabled
                 if self.duplicate_mode and group_id is not None:
-                    # Remove all polygons with the same group ID
-                    self.polygons = [p for p in self.polygons if p.get('group_id') != group_id]
+                    # Remove all polygons with the same group ID using proper indexing
+                    polygons_to_remove = []
+                    for idx, p in enumerate(self.polygons):
+                        if p.get('group_id') == group_id:
+                            polygons_to_remove.append(idx)
+                    
+                    # Remove polygons in reverse order to avoid index shifting issues
+                    for idx in reversed(sorted(polygons_to_remove)):
+                        if idx < len(self.polygons):
+                            self.polygons.pop(idx)
                 else:
                     # If duplicate mode is off or no group ID, just remove the single polygon
-                    self.polygons.pop(i)
+                    if i < len(self.polygons):
+                        self.polygons.pop(i)
+                
+                # Clear overlap data since polygon indices may have changed
+                self.overlap_data = []
+                self.showing_overlaps = False
+                
+                # Reset any selected polygon index to avoid corruption
+                if hasattr(self, 'selected_polygon_index'):
+                    self.selected_polygon_index = -1
+                if hasattr(self, 'selected_control_point'):
+                    self.selected_control_point = -1
                 
                 self.update()
                 return True  # Successfully erased polygon(s)
@@ -1448,16 +1539,37 @@ class Canvas(QWidget):
         self.selected_polygon_index = -1
         self.selected_polygon_indices = []
         
-        # Check polygons in reverse order (last drawn first)
-        for i in range(len(self.polygons) - 1, -1, -1):
+        # Find all polygons that contain the point
+        candidates = []
+        for i in range(len(self.polygons)):
             polygon_data = self.polygons[i]
             points = polygon_data['points']
             
             if self.point_in_polygon(world_x, world_y, points):
-                self.selected_polygon_index = i
-                break
+                # Calculate polygon area to prefer smaller polygons (more precise selection)
+                area = self.calculate_polygon_area(points)
+                candidates.append((i, area))
+        
+        if candidates:
+            # Sort by area (smallest first) and then by index (most recent first)
+            candidates.sort(key=lambda x: (x[1], -x[0]))
+            self.selected_polygon_index = candidates[0][0]
+            print(f"DEBUG: Selected polygon {self.selected_polygon_index} (area={candidates[0][1]:.2f}) from {len(candidates)} candidates")
         
         self.update()
+    
+    def calculate_polygon_area(self, points):
+        """Calculate the area of a polygon using the shoelace formula"""
+        if len(points) < 3:
+            return 0
+        
+        area = 0
+        n = len(points)
+        for i in range(n):
+            j = (i + 1) % n
+            area += points[i][0] * points[j][1]
+            area -= points[j][0] * points[i][1]
+        return abs(area) / 2
     
     def point_in_polygon(self, x, y, polygon_points):
         """Check if a point is inside a polygon using ray casting algorithm"""
@@ -1627,6 +1739,10 @@ class Canvas(QWidget):
         """Draw overlap visualization with color-coded polygons"""
         # First, color the overlapping polygons
         for poly1_idx, poly2_idx, overlap_points in self.overlap_data:
+            # Check if indices are still valid
+            if poly1_idx >= len(self.polygons) or poly2_idx >= len(self.polygons):
+                continue  # Skip invalid indices
+                
             # Color older polygon (lower index) in green
             older_idx = min(poly1_idx, poly2_idx)
             newer_idx = max(poly1_idx, poly2_idx)
@@ -1940,8 +2056,14 @@ class SidePanel(QFrame):
             self.edge_width_input.textChanged.connect(self.on_edge_width_changed)
             layout.addWidget(self.edge_width_input)
             
-            # Add stretch to push content to top (only for right panel)
+            # Add stretch to push cursor position to bottom (only for right panel)
             layout.addStretch()
+            
+            # Add cursor position label at the bottom
+            self.cursor_position_label = QLabel('Cursor: (0, 0)')
+            self.cursor_position_label.setStyleSheet("font-family: monospace; font-size: 10px; color: #666;")
+            self.cursor_position_label.setAlignment(Qt.AlignCenter)
+            layout.addWidget(self.cursor_position_label)
         
         # For left panel, stretch was already added before save/load buttons
         
@@ -2099,8 +2221,8 @@ class SidePanel(QFrame):
             
             if self.canvas:
                 self.canvas.grid_size = grid_size
-                # Re-center grid on image if there's an image loaded
-                self.canvas.center_grid_on_image()
+                # Re-center image on grid if there's an image loaded
+                self.canvas.center_image_on_grid()
                 self.canvas.update()
         except ValueError:
             # Invalid input, ignore
@@ -2166,9 +2288,14 @@ class SidePanel(QFrame):
             with open(filename, 'w', newline='', encoding='utf-8') as csvfile:
                 writer = csv.writer(csvfile)
                 
-                # Write header with frame color support and group ID
+                # Write header with frame color support, group ID, and image transform parameters
                 writer.writerow(['polygon_id', 'coordinates', 'color_r', 'color_g', 'color_b', 'color_a', 
                                'frame_r', 'frame_g', 'frame_b', 'frame_a', 'group_id'])
+                
+                # Write image transform parameters as a special row with polygon_id = 'IMAGE_PARAMS'
+                writer.writerow(['IMAGE_PARAMS', '', 
+                               self.canvas.image_offset_x, self.canvas.image_offset_y,
+                               self.canvas.current_x_scale, self.canvas.current_y_scale, '', '', '', '', ''])
                 
                 # Write each polygon
                 for i, polygon_data in enumerate(self.canvas.polygons):
@@ -2222,14 +2349,28 @@ class SidePanel(QFrame):
         
         try:
             polygons = []
+            saved_image_params = None
             
             with open(filename, 'r', newline='', encoding='utf-8') as csvfile:
                 reader = csv.DictReader(csvfile)
                 for row_num, row in enumerate(reader, 1):
                     try:
-                        # Parse coordinates - handle JSON array format
+                        # Check if this is the image parameters row
                         coords_str = row['coordinates'] if 'coordinates' in row else row.get('polygon_coords', '')
+                        if coords_str == 'IMAGE_PARAMS':
+                            # This row contains image transformation parameters
+                            try:
+                                saved_image_params = {
+                                    'image_offset_x': float(row.get('color_r', 0)),
+                                    'image_offset_y': float(row.get('color_g', 0)),
+                                    'x_scale_factor': float(row.get('color_b', 1)),
+                                    'y_scale_factor': float(row.get('color_a', 1))
+                                }
+                            except:
+                                saved_image_params = None
+                            continue
                         
+                        # Parse coordinates - handle JSON array format
                         # Remove quotes and parse as JSON
                         coords_str = coords_str.strip('"\'')
                         
@@ -2316,6 +2457,38 @@ class SidePanel(QFrame):
                 # Clear existing polygons and load new ones
                 self.canvas.polygons = polygons
                 
+                # Adjust image and grid positioning if we have saved image parameters
+                if saved_image_params and hasattr(self.canvas, 'image_offset_x'):
+                    # Calculate the difference between saved and current scale factors
+                    current_x_scale = getattr(self.canvas, 'current_x_scale', 1.0)
+                    current_y_scale = getattr(self.canvas, 'current_y_scale', 1.0)
+                    
+                    saved_x_scale = saved_image_params['x_scale_factor']
+                    saved_y_scale = saved_image_params['y_scale_factor']
+                    
+                    # Only adjust if scale factors are different
+                    if abs(current_x_scale - saved_x_scale) > 1e-6 or abs(current_y_scale - saved_y_scale) > 1e-6:
+                        # Calculate how much to adjust the image position to keep grid at (0,0)
+                        # The grid should remain at the top-left, so we adjust the image position
+                        saved_image_offset_x = saved_image_params['image_offset_x']
+                        saved_image_offset_y = saved_image_params['image_offset_y']
+                        
+                        # Calculate new image offset to maintain grid at (0,0)
+                        # When scale changes, the image needs to be repositioned
+                        scale_ratio_x = current_x_scale / saved_x_scale
+                        scale_ratio_y = current_y_scale / saved_y_scale
+                        
+                        # Adjust image offset to compensate for scale difference
+                        new_image_offset_x = saved_image_offset_x * scale_ratio_x
+                        new_image_offset_y = saved_image_offset_y * scale_ratio_y
+                        
+                        # Update canvas positioning
+                        self.canvas.image_offset_x = new_image_offset_x
+                        self.canvas.image_offset_y = new_image_offset_y
+                        
+                        print(f"Adjusted image position: offset_x={new_image_offset_x:.2f}, offset_y={new_image_offset_y:.2f}")
+                        print(f"Scale ratios: x={scale_ratio_x:.3f}, y={scale_ratio_y:.3f}")
+                
                 # Update next_group_id to avoid conflicts with loaded polygons
                 max_group_id = 0
                 for polygon in polygons:
@@ -2336,6 +2509,11 @@ class SidePanel(QFrame):
                 
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to load array: {str(e)}")
+
+    def update_cursor_position(self, x, y):
+        """Update the cursor position label with world coordinates"""
+        if hasattr(self, 'cursor_position_label'):
+            self.cursor_position_label.setText(f'Cursor: ({x:.1f}, {y:.1f})')
 
 
 class MandalaMosaicWindow(QMainWindow):
@@ -2369,6 +2547,7 @@ class MandalaMosaicWindow(QMainWindow):
         
         # Create right panel (with reference to canvas for background loading)
         right_panel = SidePanel("Right Panel", canvas)
+        canvas.right_panel = right_panel  # Store reference for cursor position updates
         main_layout.addWidget(right_panel)
         
         central_widget.setLayout(main_layout)
@@ -2380,7 +2559,7 @@ def main():
     
     # Create and show the main window
     window = MandalaMosaicWindow()
-    window.show()
+    window.showMaximized()  # Maximize window but keep title bar
     
     # Start the event loop
     sys.exit(app.exec_())
