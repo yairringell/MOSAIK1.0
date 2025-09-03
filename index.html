@@ -67,16 +67,6 @@
             background-color: #0056b3;
         }
 
-        .file-info {
-            background-color: white;
-            padding: 10px;
-            border-radius: 5px;
-            font-size: 14px;
-            color: #333;
-            box-shadow: 0 2px 5px rgba(0,0,0,0.1);
-            text-align: center;
-        }
-
         #canvas {
             border: 2px solid #ccc;
             cursor: crosshair;
@@ -97,12 +87,6 @@
 
         .load-csv-btn:hover {
             background-color: #0056b3;
-        }
-
-        .file-info {
-            margin-top: 10px;
-            font-size: 14px;
-            color: #ccc;
         }
 
         #fileInput {
@@ -155,12 +139,37 @@
 <body>
     <div class="canvas-container">
         <div class="left-controls">
-            <button class="load-csv-btn" onclick="document.getElementById('fileInput').click()">Load CSV</button>
+            <button class="load-csv-btn" onclick="document.getElementById('fileInput').click()">Load CSV File</button>
             <input type="file" id="fileInput" accept=".csv" onchange="loadCSV(event)">
-            <div class="file-info" id="fileInfo">No file loaded</div>
+            
+            <div style="margin-top: 15px;">
+                <label for="tileSizeInput" style="color: #333; font-size: 14px; display: block; margin-bottom: 5px;">Tile Size:</label>
+                <input type="number" id="tileSizeInput" value="300" min="10" max="5000" 
+                       style="width: 100%; padding: 8px; font-size: 14px; border: 1px solid #ccc; border-radius: 3px; box-sizing: border-box;"
+                       onchange="updateGrid()" oninput="updateGrid()">
+            </div>
         </div>
         
-        <canvas id="canvas" width="800" height="600"></canvas>
+        <div style="display: flex; align-items: center; gap: 20px;">
+            <!-- Row controls on the left -->
+            <div style="display: flex; flex-direction: column; align-items: center; gap: 5px;">
+                <span style="font-size: 12px; color: #666;">Rows</span>
+                <button id="plusRowBtn" onclick="addRow()" style="background-color: #28a745; color: white; border: none; padding: 6px 12px; font-size: 16px; font-weight: bold; cursor: pointer; border-radius: 3px; min-width: 30px; margin-bottom: 5px;">+</button>
+                <button id="minusRowBtn" onclick="removeRow()" style="background-color: #dc3545; color: white; border: none; padding: 6px 12px; font-size: 16px; font-weight: bold; cursor: pointer; border-radius: 3px; min-width: 30px;">−</button>
+            </div>
+            
+            <!-- Canvas with column controls above -->
+            <div style="display: flex; flex-direction: column; align-items: center;">
+                <div style="display: flex; flex-direction: column; align-items: center; gap: 5px; margin-bottom: 10px;">
+                    <span style="font-size: 12px; color: #666;">Columns</span>
+                    <div>
+                        <button id="minusBtn" onclick="removeColumn()" style="background-color: #dc3545; color: white; border: none; padding: 6px 12px; margin-right: 5px; font-size: 16px; font-weight: bold; cursor: pointer; border-radius: 3px; min-width: 30px;">−</button>
+                        <button id="plusBtn" onclick="addColumn()" style="background-color: #28a745; color: white; border: none; padding: 6px 12px; font-size: 16px; font-weight: bold; cursor: pointer; border-radius: 3px; min-width: 30px;">+</button>
+                    </div>
+                </div>
+                <canvas id="canvas" width="900" height="600"></canvas>
+            </div>
+        </div>
         
         <div class="right-controls">
             <div class="debug-window">
@@ -171,74 +180,10 @@
         </div>
     </div>
 
-    <script type="text/paperscript" canvas="canvas">
-        var polygonPaths = [];
-        var showEdges = false; // Changed to false by default
-        var bounds = null;
-
-        // Set canvas background to dark gray
-        project.view.element.style.backgroundColor = '#404040';
-
-        // Make functions globally available
-        window.paperFunctions = {
-            clearPolygons: function() {
-                project.activeLayer.removeChildren();
-                polygonPaths = [];
-            },
-            
-            createPolygon: function(coords, r, g, b) {
-                try {
-                    var path = new Path();
-                    for (var j = 0; j < coords.length; j++) {
-                        path.add(new Point(coords[j][0], coords[j][1]));
-                    }
-                    path.closed = true;
-                    path.fillColor = new Color(r/255, g/255, b/255);
-                    // Remove stroke by default (no edges)
-                    if (showEdges) {
-                        path.strokeColor = 'black';
-                        path.strokeWidth = 0.5;
-                    }
-                    polygonPaths.push(path);
-                    return true;
-                } catch (error) {
-                    return false;
-                }
-            }
-        };
-
-        // Mouse wheel zoom
-        view.onMouseWheel = function(event) {
-            var oldZoom = view.zoom;
-            var newZoom = event.delta < 0 ? oldZoom * 1.05 : oldZoom * 0.95;
-            newZoom = Math.max(0.05, Math.min(20, newZoom));
-            
-            var beta = oldZoom / newZoom;
-            var mousePosition = view.viewToProject(event.point);
-            var viewCenter = view.center;
-            var offset = mousePosition.subtract(viewCenter);
-            var newCenter = mousePosition.subtract(offset.multiply(beta));
-            
-            view.zoom = newZoom;
-            view.center = newCenter;
-        };
-
-        // Mouse drag for panning
-        function onMouseDrag(event) {
-            view.center = view.center.subtract(event.delta);
-        }
-
-        // Set initial view with top-left corner at (0,0)
-        view.center = new Point(view.size.width / 2, view.size.height / 2);
-        view.zoom = 1; // Original size, no scaling
-
-        // Initialize with instruction text (light gray for dark background)
-        var text = new PointText({
-            point: view.center,
-            content: 'Load a CSV file to view polygons',
-            fontSize: 18,
-            fillColor: '#cccccc',
-            justification: 'center'
+    <script>
+        // Initialize Paper.js canvas when the page loads
+        window.addEventListener('load', function() {
+            // This will be handled by mosaic-canvas.js
         });
     </script>
 
